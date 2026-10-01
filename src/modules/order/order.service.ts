@@ -1,0 +1,783 @@
+import { supabaseAdmin } from '../../config/supabase';
+import { ApiError } from '../../utils/ApiError';
+import { matchingService } from './matching.service';
+import { notificationService } from '../notification/notification.service';
+import { logger } from '../../config/logger';
+
+// ============================================================
+// Helpers
+// ============================================================
+
+const generateOrderCode = () =>
+    'GR' + Date.now().toString().slice(-10) + Math.floor(Math.random() * 1000);
+
+function parseEwkbHex(hex: string): { latitude: number; longitude: number } | null {
+    if (!hex || typeof hex !== 'string') return null;
+    if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length < 50) return null;
+
+    try {
+        const little = hex.slice(0, 2) === '01';
+        const lngHex = hex.slice(18, 34);
+        const latHex = hex.slice(34, 50);
+
+        const hexToDouble = (h: string) => {
+            const bytes = new Uint8Array(8);
+            for (let i = 0; i < 8; i++) {
+                const idx = little ? i : 7 - i;
+                bytes[idx] = parseInt(h.substr(i * 2, 2), 16);
+            }
+            return new DataView(bytes.buffer).getFloat64(0, true);
+        };
+
+        const longitude = hexToDouble(lngHex);
+        const latitude = hexToDouble(latHex);
+
+        if (
+            Number.isFinite(latitude) &&
+            Number.isFinite(longitude) &&
+            !(latitude === 0 && longitude === 0)
+        ) {
+            return { latitude, longitude };
+        }
+    } catch (err) {
+        console.warn('[parseEwkbHex] gagal:', err);
+    }
+    return null;
+}
+
+/**
+ * Parse kolom geography apapun (hex EWKB, GeoJSON, WKT, object) jadi { lat, lng }.
+ */
+function parseLocation(
+    loc: any
+): { latitude: number; longitude: number } | null {
+    if (!loc) return null;
+
+    // 1. Hex EWKB
+    if (typeof loc === 'string') {
+        const hex = parseEwkbHex(loc);
+        if (hex) return hex;
+
+        // WKT: "POINT(lng lat)"
+        const m = loc.match(/POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i);
+        if (m) {
+            return { latitude: Number(m[2]), longitude: Number(m[1]) };
+        }
+        return null;
+    }
+
+    // 2. GeoJSON: { type: 'Point', coordinates: [lng, lat] }
+    if (Array.isArray(loc?.coordinates) && loc.coordinates.length >= 2) {
+        const [lng, lat] = loc.coordinates;
+        if (typeof lat === 'number' && typeof lng === 'number') {
+            return { latitude: lat, longitude: lng };
+        }
+    }
+
+    // 3. Object { latitude, longitude }
+    if (
+        typeof loc.latitude === 'number' &&
+        typeof loc.longitude === 'number'
+    ) {
+        return { latitude: loc.latitude, longitude: loc.longitude };
+    }
+
+    return null;
+}
+
+function firstName(full: string | null | undefined): string {
+    if (!full) return 'Driver';
+    return full.trim().split(/\s+/)[0] || 'Driver';
+}
+
+function prettyPlace(name: string | null | undefined): string {
+    if (!name) return 'lokasimu';
+    const parts = name.split(',').map((s) => s.trim());
+    const cleaned = parts.filter(
+        (p) => p && !/^[A-Z0-9]{4,8}\+[A-Z0-9]+$/i.test(p)
+    );
+    return cleaned[0] ?? name;
+}
+
+// ============================================================
+// Service
+// ============================================================
+
+export const orderService = {
+    // ============================================================
+    // CREATE ORDER
+    // ============================================================
+    async create(customerId: string, input: any) {
+        let delivery_fee = 0;
+        let admin_fee = 0;
+        let driver_earning = 0;
+        let platform_earning = 0;
+        let tariffCode: string | null = null;
+        let tariffLabel: string | null = null;
+
+        // ---- Hitung tarif ----
+        if (input.tariff_code) {
+            const { data: t, error: tErr } = await supabaseAdmin.rpc(
+                'calculate_tariff',
+                {
+                    p_code: input.tariff_code,
+                    p_distance_km: input.distance_km,
+                }
+            );
+
+            if (tErr) {
+                logger.error('calculate_tariff gagal', {
+                    error: tErr,
+                    code: input.tariff_code,
+                });
+                throw ApiError.internal(tErr.message);
+            }
+
+            const row = Array.isArray(t) ? t[0] : t;
+            if (!row)
+                throw ApiError.badRequest(
+                    `Tarif "${input.tariff_code}" tidak ditemukan`
+                );
+
+            delivery_fee = row.price ?? 0;
+            admin_fee = Math.round(delivery_fee * 0.05);
+            driver_earning = delivery_fee - admin_fee;
+            platform_earning = admin_fee;
+            tariffCode = row.code ?? input.tariff_code;
+            tariffLabel = row.label ?? input.option_name ?? null;
+        } else {
+            const { data: fare } = await supabaseAdmin.rpc('calculate_fare', {
+                p_distance_km: input.distance_km,
+                p_type: input.type,
+                p_is_peak_hour: false,
+            });
+            const fareRow = Array.isArray(fare) ? fare[0] : fare;
+            delivery_fee = fareRow?.delivery_fee ?? 0;
+            admin_fee = fareRow?.admin_fee ?? 0;
+            driver_earning = fareRow?.driver_earning ?? 0;
+            platform_earning = admin_fee;
+        }
+
+        // ---- Subtotal items (food) ----
+        let subtotal = 0;
+        let packaging_fee = 0;
+        if (input.items?.length) {
+            subtotal = input.items.reduce(
+                (s: number, i: any) => s + i.qty * i.price,
+                0
+            );
+            packaging_fee = 3000;
+        }
+
+        const total_fare = subtotal + delivery_fee + packaging_fee;
+
+        // ---- Generate send_code untuk type 'send' ----
+        let sendCode: string | null = null;
+        if (input.type === 'send') {
+            const { data: codeData, error: codeErr } = await supabaseAdmin.rpc(
+                'generate_send_code'
+            );
+            if (codeErr) {
+                logger.error('Gagal generate send_code', { error: codeErr });
+                sendCode =
+                    'WS' +
+                    Math.random().toString(36).slice(2, 10).toUpperCase();
+            } else {
+                sendCode = codeData as string;
+            }
+            console.log('[order.create] send_code:', sendCode);
+        }
+
+        // ---- Insert order ----
+        const { data: order, error } = await supabaseAdmin
+            .from('orders')
+            .insert({
+                order_code: generateOrderCode(),
+                type: input.type,
+                customer_id: customerId,
+                merchant_id: input.merchant_id || null,
+                pickup_name: input.pickup_name,
+                pickup_address: input.pickup_address,
+                pickup_location: `POINT(${input.pickup_lng} ${input.pickup_lat})`,
+                dropoff_name: input.dropoff_name,
+                dropoff_address: input.dropoff_address,
+                dropoff_location: `POINT(${input.dropoff_lng} ${input.dropoff_lat})`,
+                distance_km: input.distance_km,
+                duration_min: input.duration_min,
+                subtotal,
+                delivery_fee,
+                packaging_fee,
+                admin_fee,
+                total_fare,
+                driver_earning,
+                merchant_earning: subtotal,
+                platform_earning,
+                payment_method: input.payment_method,
+                notes: input.notes,
+                receiver_name: input.receiver_name,
+                receiver_phone: input.receiver_phone,
+                sender_name: input.sender_name ?? null,
+                sender_phone: input.sender_phone,
+                tariff_code: tariffCode,
+                option_name: tariffLabel,
+                send_code: sendCode,
+                status: 'pending',
+
+                sender_landmark: input.sender_landmark ?? null,
+                receiver_landmark: input.receiver_landmark ?? null,
+
+                // ⬇️ Field paket WarSend
+                package_type: input.package_type ?? null,
+                package_size: input.package_size ?? null,
+                package_weight: input.package_weight ?? null,
+                package_protection: input.package_protection ?? 'silver',
+            })
+            .select()
+            .single();
+
+        if (error || !order)
+            throw ApiError.internal(error?.message || 'Failed create order');
+
+        console.log('[order.create] Order created:', {
+            id: order.id,
+            type: order.type,
+            tariff_code: order.tariff_code,
+            delivery_fee: order.delivery_fee,
+            send_code: order.send_code,
+        });
+
+        // ---- Insert order items (food) ----
+        if (input.items?.length) {
+            await supabaseAdmin.from('order_items').insert(
+                input.items.map((i: any) => ({
+                    order_id: order.id,
+                    menu_item_id: i.menu_item_id,
+                    name: i.name,
+                    variant: i.variant,
+                    qty: i.qty,
+                    price: i.price,
+                    subtotal: i.qty * i.price,
+                }))
+            );
+        }
+
+        // ---- Matching driver ----
+        const drivers = await matchingService.findDriversForOrder(
+            order.id,
+            input.pickup_lat,
+            input.pickup_lng,
+            input.type,
+            tariffCode
+        );
+
+        const pickupShort = prettyPlace(input.pickup_name);
+        const dropoffShort = prettyPlace(input.dropoff_name);
+        const jarakText =
+            input.distance_km < 1
+                ? `${Math.round(input.distance_km * 1000)} m`
+                : `${input.distance_km.toFixed(1)} km`;
+        const fareText = `Rp${Number(delivery_fee).toLocaleString('id-ID')}`;
+
+        // ---- Notif ke driver ----
+        for (const d of drivers) {
+            try {
+                await notificationService.sendToUser(d.user_id, {
+                    title: 'Orderan baru masuk 🚀',
+                    body: `${pickupShort} → ${dropoffShort} · ${jarakText} · ${fareText}`,
+                    data: {
+                        order_id: order.id,
+                        type: 'new_order',
+                        tariff_code: tariffCode,
+                        service: input.type,
+                    },
+                });
+            } catch (err: any) {
+                logger.warn('Gagal kirim notif ke driver', {
+                    driverId: d.user_id,
+                    err: err.message,
+                });
+            }
+        }
+
+        // ---- Notif ke customer kalau tidak ada driver ----
+        if (drivers.length === 0) {
+            try {
+                await notificationService.sendToUser(customerId, {
+                    title: 'Mencari driver…',
+                    body: 'Kami sedang mencarikan driver untukmu. Mohon tunggu.',
+                    data: {
+                        order_id: order.id,
+                        type: 'no_driver_yet',
+                        service: input.type,
+                    },
+                });
+            } catch (err: any) {
+                logger.warn('Gagal kirim notif ke customer', {
+                    customerId,
+                    err: err.message,
+                });
+            }
+        }
+
+        // ⬇️ Return shape sama dengan getById() supaya frontend konsisten
+        return await orderService.getById(order.id, customerId, 'customer');
+    },
+
+    // ============================================================
+    // ACCEPT ORDER (driver)
+    // ============================================================
+    async accept(orderId: number, driverId: string) {
+        const { data: order } = await supabaseAdmin
+            .from('orders')
+            .select('*')
+            .eq('id', orderId)
+            .single();
+
+        if (!order) throw ApiError.notFound('Order not found');
+        if (order.status !== 'pending')
+            throw ApiError.conflict('Order already taken');
+
+        // ⬇️ Validasi: driver harus ada di order_bids
+        const { data: bid } = await supabaseAdmin
+            .from('order_bids')
+            .select('id')
+            .eq('order_id', orderId)
+            .eq('driver_id', driverId)
+            .eq('status', 'pending')
+            .maybeSingle();
+
+        if (!bid) {
+            throw ApiError.forbidden(
+                'Kamu tidak diundang untuk order ini'
+            );
+        }
+
+        // ---- Update order (race-safe) ----
+        const { data, error } = await supabaseAdmin
+            .from('orders')
+            .update({
+                driver_id: driverId,
+                status: 'accepted',
+                accepted_at: new Date().toISOString(),
+            })
+            .eq('id', orderId)
+            .eq('status', 'pending')
+            .select()
+            .single();
+
+        if (error || !data)
+            throw ApiError.conflict('Order already taken by another driver');
+
+        // ---- Update bids ----
+        await supabaseAdmin
+            .from('order_bids')
+            .update({
+                status: 'accepted',
+                responded_at: new Date().toISOString(),
+            })
+            .eq('order_id', orderId)
+            .eq('driver_id', driverId);
+
+        await supabaseAdmin
+            .from('order_bids')
+            .update({ status: 'rejected', responded_at: new Date().toISOString() })
+            .eq('order_id', orderId)
+            .neq('driver_id', driverId)
+            .eq('status', 'pending');
+
+        // ---- Set driver busy ----
+        await supabaseAdmin
+            .from('driver_profiles')
+            .update({ status: 'busy' })
+            .eq('user_id', driverId);
+
+        // ---- Notif ke customer ----
+        const { data: driverProfile } = await supabaseAdmin
+            .from('profiles')
+            .select('full_name')
+            .eq('id', driverId)
+            .maybeSingle();
+
+        const { data: driverVehicle } = await supabaseAdmin
+            .from('driver_profiles')
+            .select('vehicle_brand, plate_number')
+            .eq('user_id', driverId)
+            .maybeSingle();
+
+        const dName = firstName(driverProfile?.full_name);
+        const vehicle = driverVehicle?.vehicle_brand ?? 'kendaraan';
+        const plate = driverVehicle?.plate_number ?? '';
+
+        const body = plate
+            ? `${dName} (${vehicle} ${plate}) sedang menuju ke lokasimu`
+            : `${dName} (${vehicle}) sedang menuju ke lokasimu`;
+
+        await notificationService.sendToUser(order.customer_id, {
+            title: 'Drivermu sudah dapat! 🎉',
+            body,
+            data: {
+                order_id: orderId,
+                type: 'driver_accepted',
+                service: order.type,
+                tariff_code: order.tariff_code,
+            },
+        });
+
+        return data;
+    },
+
+    // ============================================================
+    // UPDATE STATUS
+    // ============================================================
+    async updateStatus(
+        orderId: number,
+        userId: string,
+        role: string,
+        status: string,
+        reason?: string
+    ) {
+        const { data: order } = await supabaseAdmin
+            .from('orders')
+            .select('*')
+            .eq('id', orderId)
+            .single();
+        if (!order) throw ApiError.notFound();
+
+        const isCustomer = order.customer_id === userId;
+        const isDriver = order.driver_id === userId;
+        const isMerchant = order.merchant_id === userId;
+        if (!isCustomer && !isDriver && !isMerchant && role !== 'admin') {
+            throw ApiError.forbidden();
+        }
+
+        const patch: any = { status };
+        if (status === 'arrived') patch.arrived_at = new Date().toISOString();
+        if (status === 'in_progress')
+            patch.started_at = new Date().toISOString();
+        if (status === 'completed')
+            patch.completed_at = new Date().toISOString();
+        if (status === 'cancelled') {
+            patch.cancelled_at = new Date().toISOString();
+            patch.cancellation_reason = reason;
+        }
+
+        const { data, error } = await supabaseAdmin
+            .from('orders')
+            .update(patch)
+            .eq('id', orderId)
+            .select()
+            .single();
+        if (error) throw ApiError.internal(error.message);
+
+        // ---- Reset driver online + cleanup bids ----
+        if (
+            (status === 'completed' || status === 'cancelled') &&
+            order.driver_id
+        ) {
+            await supabaseAdmin
+                .from('driver_profiles')
+                .update({ status: 'online' })
+                .eq('user_id', order.driver_id);
+
+            logger.info('Driver online kembali', {
+                driverId: order.driver_id,
+                reason: status,
+            });
+
+            // ⬇️ Cleanup bid yang masih pending
+            await supabaseAdmin
+                .from('order_bids')
+                .update({
+                    status: status === 'completed' ? 'expired' : 'rejected',
+                    responded_at: new Date().toISOString(),
+                })
+                .eq('order_id', orderId)
+                .eq('status', 'pending');
+
+            logger.info('Order bids cleaned up', { orderId, status });
+        }
+
+        // ---- Update total_trips ----
+        if (status === 'completed' && order.driver_id) {
+            const { count: tripsCount } = await supabaseAdmin
+                .from('orders')
+                .select('id', { count: 'exact', head: true })
+                .eq('driver_id', order.driver_id)
+                .eq('status', 'completed');
+
+            await supabaseAdmin
+                .from('driver_profiles')
+                .update({ total_trips: tripsCount ?? 0 })
+                .eq('user_id', order.driver_id);
+
+            logger.info('Driver total_trips updated', {
+                driverId: order.driver_id,
+                total_trips: tripsCount,
+            });
+        }
+
+        // ---- Notif ----
+        const dropoffShort = prettyPlace(order.dropoff_name);
+        const pickupShort = prettyPlace(order.pickup_name);
+
+        const senderName = await (async () => {
+            const { data: p } = await supabaseAdmin
+                .from('profiles')
+                .select('full_name, role')
+                .eq('id', userId)
+                .maybeSingle();
+            return p;
+        })();
+
+        const senderIsDriver = senderName?.role === 'driver';
+        const senderFirstName = firstName(senderName?.full_name);
+
+        const notifyTargets = [
+            order.customer_id,
+            order.driver_id,
+            order.merchant_id,
+        ].filter((x) => x && x !== userId);
+
+        for (const uid of notifyTargets) {
+            try {
+                const isTargetCustomer = uid === order.customer_id;
+                const isTargetDriver = uid === order.driver_id;
+
+                let title = 'Update pesanan';
+                let body = '';
+
+                if (status === 'arrived') {
+                    if (isTargetCustomer && senderIsDriver) {
+                        title = 'Driver sudah tiba 📍';
+                        body = `${senderFirstName} sudah menunggu di ${pickupShort}. Siap-siap ya!`;
+                    } else if (isTargetDriver) {
+                        title = 'Kamu sudah di titik jemput';
+                        body = `Tunggu customer di ${pickupShort} ya`;
+                    } else {
+                        title = 'Driver sudah tiba';
+                        body = `${senderFirstName} sudah di ${pickupShort}`;
+                    }
+                } else if (status === 'in_progress') {
+                    if (isTargetCustomer && senderIsDriver) {
+                        title = 'Perjalanan dimulai 🚗';
+                        body = `Menuju ${dropoffShort}. Hati-hati di jalan!`;
+                    } else if (isTargetDriver) {
+                        title = 'Perjalanan dimulai';
+                        body = `Antar customer ke ${dropoffShort}`;
+                    } else {
+                        title = 'Dalam perjalanan';
+                        body = `Menuju ${dropoffShort}`;
+                    }
+                } else if (status === 'completed') {
+                    if (isTargetCustomer && senderIsDriver) {
+                        title = 'Sudah sampai tujuan ✨';
+                        body = `Terima kasih sudah pakai Waruung. Jangan lupa beri rating untuk ${senderFirstName} ya!`;
+                    } else if (isTargetDriver) {
+                        title = 'Perjalanan selesai 🎯';
+                        body = 'Order selesai. Kamu kembali online sekarang.';
+                    } else {
+                        title = 'Pesanan selesai';
+                        body = `Sampai di ${dropoffShort}`;
+                    }
+                } else if (status === 'cancelled') {
+                    if (isTargetCustomer) {
+                        title = 'Pesanan dibatalkan';
+                        body = reason ?? 'Pesanan dibatalkan oleh driver';
+                    } else if (isTargetDriver) {
+                        title = 'Pesanan dibatalkan';
+                        body = reason ?? 'Pesanan dibatalkan oleh customer';
+                    } else {
+                        title = 'Pesanan dibatalkan';
+                        body = reason ?? 'Pesanan dibatalkan';
+                    }
+                } else {
+                    body = `Status: ${status}`;
+                }
+
+                await notificationService.sendToUser(uid as string, {
+                    title,
+                    body,
+                    data: {
+                        order_id: orderId,
+                        type: 'status_update',
+                        status,
+                        service: order.type,
+                        tariff_code: order.tariff_code,
+                    },
+                });
+            } catch (err: any) {
+                logger.warn('Gagal kirim notif update status', {
+                    uid,
+                    err: err.message,
+                });
+            }
+        }
+
+        return data;
+    },
+
+    // ============================================================
+    // GET BY ID
+    // ============================================================
+    async getById(orderId: number, userId: string, role: string) {
+        const { data: order, error } = await supabaseAdmin
+            .from('orders')
+            .select('*, order_items(*), order_status_history(*)')
+            .eq('id', orderId)
+            .single();
+        if (error || !order) throw ApiError.notFound();
+
+        if (
+            role !== 'admin' &&
+            order.customer_id !== userId &&
+            order.driver_id !== userId &&
+            order.merchant_id !== userId
+        ) {
+            throw ApiError.forbidden();
+        }
+
+        const [customerRes, driverRes, merchantRes] = await Promise.all([
+            supabaseAdmin
+                .from('profiles')
+                .select('id, full_name, phone, email, avatar_url')
+                .eq('id', order.customer_id)
+                .maybeSingle(),
+            order.driver_id
+                ? supabaseAdmin
+                    .from('profiles')
+                    .select('id, full_name, phone, email, avatar_url')
+                    .eq('id', order.driver_id)
+                    .maybeSingle()
+                : Promise.resolve({ data: null }),
+            order.merchant_id
+                ? supabaseAdmin
+                    .from('merchant_profiles')
+                    .select('user_id, store_name, address, logo_url')
+                    .eq('user_id', order.merchant_id)
+                    .maybeSingle()
+                : Promise.resolve({ data: null }),
+        ]);
+
+        // ---- Statistik customer ----
+        let customerStats: {
+            total_orders: number;
+            rating_avg: number | null;
+        } | null = null;
+        if (order.customer_id) {
+            const { count: totalOrders } = await supabaseAdmin
+                .from('orders')
+                .select('id', { count: 'exact', head: true })
+                .eq('customer_id', order.customer_id)
+                .eq('status', 'completed');
+
+            const { data: custRatings } = await supabaseAdmin
+                .from('ratings')
+                .select('rating')
+                .eq('reviewee_id', order.customer_id);
+
+            const ratingAvg =
+                custRatings && custRatings.length > 0
+                    ? Number(
+                        (
+                            custRatings.reduce(
+                                (s, r: any) => s + (r.rating ?? 0),
+                                0
+                            ) / custRatings.length
+                        ).toFixed(2)
+                    )
+                    : null;
+
+            customerStats = {
+                total_orders: totalOrders ?? 0,
+                rating_avg: ratingAvg,
+            };
+        }
+
+        // ---- Driver profile + coords ----
+        let driverProfile: any = null;
+        let driverCoords: { latitude: number; longitude: number } | null = null;
+
+        if (order.driver_id) {
+            const { data: dp } = await supabaseAdmin
+                .from('driver_profiles')
+                .select(
+                    'vehicle_type, plate_number, vehicle_brand, rating_avg, total_trips, current_location'
+                )
+                .eq('user_id', order.driver_id)
+                .maybeSingle();
+
+            driverProfile = dp;
+
+            if (dp?.current_location) {
+                driverCoords = parseLocation(dp.current_location);
+            }
+        }
+
+        const driver = driverRes.data
+            ? {
+                ...driverRes.data,
+                ...(driverProfile ?? {}),
+                current_location: undefined,
+                coords: driverCoords,
+            }
+            : null;
+
+        const customer = customerRes.data
+            ? {
+                ...customerRes.data,
+                stats: customerStats,
+            }
+            : null;
+
+        // ---- Parse pickup & dropoff coords ----
+        const pickupCoords = parseLocation(order.pickup_location);
+        const dropoffCoords = parseLocation(order.dropoff_location);
+
+        return {
+            ...order,
+            pickup_coords: pickupCoords,
+            dropoff_coords: dropoffCoords,
+            customer,
+            driver,
+            merchant: merchantRes.data,
+        };
+    },
+
+    // ============================================================
+    // LIST BY USER
+    // ============================================================
+    async listByUser(userId: string, role: string, status?: string) {
+        let query = supabaseAdmin
+            .from('orders')
+            .select(
+                '*, customer:profiles!orders_customer_id_fkey(id, full_name, phone, avatar_url)'
+            )
+            .order('created_at', { ascending: false });
+
+        if (role === 'customer') query = query.eq('customer_id', userId);
+        else if (role === 'driver') query = query.eq('driver_id', userId);
+        else if (role === 'merchant') query = query.eq('merchant_id', userId);
+
+        if (status) query = query.eq('status', status);
+
+        const { data, error } = await query;
+        if (error) {
+            console.warn('[order.list] join gagal, fallback:', error.message);
+            let fallback = supabaseAdmin
+                .from('orders')
+                .select('*')
+                .order('created_at', { ascending: false });
+
+            if (role === 'customer') fallback = fallback.eq('customer_id', userId);
+            else if (role === 'driver')
+                fallback = fallback.eq('driver_id', userId);
+            else if (role === 'merchant')
+                fallback = fallback.eq('merchant_id', userId);
+            if (status) fallback = fallback.eq('status', status);
+
+            const { data: f } = await fallback;
+            return f || [];
+        }
+        return data || [];
+    },
+};
