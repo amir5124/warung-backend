@@ -27,6 +27,7 @@ import { orderTimeoutService } from './modules/order/order-timeout.service';
 
 const app = express();
 
+app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors({ origin: env.socketCorsOrigin }));
 app.use(express.json({ limit: '2mb' }));
