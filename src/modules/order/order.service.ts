@@ -279,16 +279,49 @@ export const orderService = {
         const fareText = `Rp${Number(delivery_fee).toLocaleString('id-ID')}`;
 
         // ---- Notif ke driver ----
+        // Payload `data` harus semua string (FCM requirement).
+        // Kita titipkan ringkasan order supaya driver bisa render modal
+        // tanpa perlu fetch /api/orders/:id (yang akan 403 karena driver_id masih null).
+        const orderPayloadForNotif = {
+            id: String(order.id),
+            order_code: order.order_code,
+            type: order.type,
+            status: order.status,
+            pickup_name: order.pickup_name ?? '',
+            pickup_address: order.pickup_address ?? '',
+            pickup_coords: {
+                latitude: input.pickup_lat,
+                longitude: input.pickup_lng,
+            },
+            dropoff_name: order.dropoff_name ?? '',
+            dropoff_address: order.dropoff_address ?? '',
+            dropoff_coords: {
+                latitude: input.dropoff_lat,
+                longitude: input.dropoff_lng,
+            },
+            distance_km: String(order.distance_km ?? 0),
+            duration_min: String(order.duration_min ?? 0),
+            delivery_fee: String(order.delivery_fee ?? 0),
+            driver_earning: String(order.driver_earning ?? 0),
+            total_fare: String(order.total_fare ?? 0),
+            payment_method: order.payment_method ?? 'cash',
+            tariff_code: order.tariff_code ?? '',
+            option_name: order.option_name ?? '',
+            customer_name: 'Customer', // opsional: bisa di-join dari profiles
+        };
+
         for (const d of drivers) {
             try {
                 await notificationService.sendToUser(d.user_id, {
                     title: 'Orderan baru masuk 🚀',
                     body: `${pickupShort} → ${dropoffShort} · ${jarakText} · ${fareText}`,
                     data: {
-                        order_id: order.id,
+                        order_id: String(order.id),
                         type: 'new_order',
-                        tariff_code: tariffCode,
+                        tariff_code: tariffCode ?? '',
                         service: input.type,
+                        // ⬇️ TAMBAH: payload order lengkap
+                        order: JSON.stringify(orderPayloadForNotif),
                     },
                 });
             } catch (err: any) {
