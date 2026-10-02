@@ -813,4 +813,71 @@ export const orderService = {
         }
         return data || [];
     },
+
+    async uploadPackagePhoto(
+        orderId: number,
+        driverId: string,
+        file: Express.Multer.File
+    ) {
+        // 1. Validasi order
+        const { data: order, error: oErr } = await supabaseAdmin
+            .from('orders')
+            .select('id, driver_id, status, type')
+            .eq('id', orderId)
+            .single();
+
+        if (oErr || !order) throw ApiError.notFound('Order tidak ditemukan');
+        if (order.driver_id !== driverId) {
+            throw ApiError.forbidden('Bukan order kamu');
+        }
+        if (order.type !== 'send') {
+            throw ApiError.badRequest('Foto paket hanya untuk order send');
+        }
+        if (order.status !== 'accepted' && order.status !== 'arrived') {
+            throw ApiError.badRequest(
+                'Foto paket hanya bisa diupload saat order aktif'
+            );
+        }
+
+        // 2. Upload ke Supabase Storage
+        const ext = file.originalname.split('.').pop() ?? 'jpg';
+        const fileName = `order-${orderId}-${Date.now()}.${ext}`;
+
+        const { error: uploadErr } = await supabaseAdmin.storage
+            .from('package-photos')
+            .upload(fileName, file.buffer, {
+                contentType: file.mimetype,
+                upsert: true,
+            });
+
+        if (uploadErr) {
+            logger.error('Upload foto paket gagal', { error: uploadErr, orderId });
+            throw ApiError.internal(uploadErr.message);
+        }
+
+        // 3. Ambil public URL
+        const { data: urlData } = supabaseAdmin.storage
+            .from('package-photos')
+            .getPublicUrl(fileName);
+
+        const photoUrl = urlData.publicUrl;
+
+        // 4. Update kolom package_photo_url di orders
+        const { error: updateErr } = await supabaseAdmin
+            .from('orders')
+            .update({ package_photo_url: photoUrl })
+            .eq('id', orderId);
+
+        if (updateErr) {
+            logger.error('Update package_photo_url gagal', {
+                error: updateErr,
+                orderId,
+            });
+            throw ApiError.internal(updateErr.message);
+        }
+
+        logger.info('Foto paket diupload', { orderId, photoUrl });
+
+        return { package_photo_url: photoUrl };
+    },
 };

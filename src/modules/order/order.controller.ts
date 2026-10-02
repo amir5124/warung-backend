@@ -63,4 +63,18 @@ export const orderController = {
         );
         return ok(res, data);
     }),
+
+    uploadPackagePhoto: asyncHandler(async (req: Request, res: Response) => {
+        if (!req.file) {
+            throw ApiError.badRequest('File tidak ditemukan');
+        }
+
+        const data = await orderService.uploadPackagePhoto(
+            Number(req.params.id),
+            req.user!.id,
+            req.file
+        );
+
+        return ok(res, data, 'Foto paket berhasil diunggah');
+    }),
 };
