@@ -105,6 +105,11 @@ export const chatService = {
             .update({ last_message_at: new Date().toISOString() })
             .eq('id', roomId);
 
+        // Broadcast realtime ke layar chat yang sedang terbuka (async, tidak blocking)
+        this.broadcastMessage(roomId, data).catch((err) => {
+            logger.warn('Gagal broadcast chat', { err: err.message });
+        });
+
         // Kirim notifikasi ke lawan bicara (async, tidak blocking)
         this.notifyRecipient(room, senderId, message, type).catch((err) => {
             logger.warn('Gagal kirim notif chat', { err: err.message });
@@ -184,12 +189,54 @@ export const chatService = {
             .update({ last_message_at: new Date().toISOString() })
             .eq('id', roomId);
 
+        // Broadcast realtime
+        this.broadcastMessage(roomId, message).catch((err) => {
+            logger.warn('Gagal broadcast chat image', { err: err.message });
+        });
+
         // Kirim notifikasi chat gambar
         this.notifyRecipient(room, senderId, null, 'image').catch((err) => {
             logger.warn('Gagal kirim notif chat image', { err: err.message });
         });
 
         return message;
+    },
+
+    /**
+     * Helper: broadcast pesan baru ke channel Realtime `chat:{roomId}`.
+     * Memakai REST API Realtime, jadi tidak butuh JWT khusus di client.
+     */
+    async broadcastMessage(roomId: number, message: unknown) {
+        const url = process.env.SUPABASE_URL;
+        const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+        if (!url || !key) {
+            logger.warn('Broadcast dilewati: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY belum diset');
+            return;
+        }
+
+        const res = await fetch(`${url}/realtime/v1/api/broadcast`, {
+            method: 'POST',
+            headers: {
+                apikey: key,
+                Authorization: `Bearer ${key}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                messages: [
+                    {
+                        topic: `chat:${roomId}`,
+                        event: 'new_message',
+                        payload: message,
+                        private: false,
+                    },
+                ],
+            }),
+        });
+
+        if (!res.ok) {
+            throw new Error(`Broadcast gagal: ${res.status} ${await res.text()}`);
+        }
     },
 
     /**
@@ -227,7 +274,6 @@ export const chatService = {
             .maybeSingle();
 
         const senderName = sender?.full_name ?? 'Pengguna';
-        const senderRole = sender?.role ?? 'customer';
 
         // Preview pesan
         let preview = '';
@@ -239,13 +285,8 @@ export const chatService = {
             preview = 'Pesan baru';
         }
 
-        const title =
-            senderRole === 'driver'
-                ? `Pesan dari ${senderName}`
-                : `Pesan dari ${senderName}`;
-
         await notificationService.sendToUser(recipientId, {
-            title,
+            title: `Pesan dari ${senderName}`,
             body: preview,
             data: {
                 type: 'chat_message',
