@@ -21,6 +21,7 @@ import profileRoutes from './modules/profile/profile.routes';
 import savedAddressRoutes from './modules/saved-address/saved-address.routes';
 import tariffRoutes from './modules/tariff/tariff.routes';
 import ratingRoutes from './modules/rating/rating.routes';
+import activityRoutes from './modules/activity/activity.routes';
 
 // ⬇️ TAMBAH 1 baris import ini
 import { orderTimeoutService } from './modules/order/order-timeout.service';
@@ -49,6 +50,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/saved-addresses', savedAddressRoutes);
 app.use('/api/tariffs', tariffRoutes);
 app.use('/api/ratings', ratingRoutes);
+app.use('/api/activity', activityRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
