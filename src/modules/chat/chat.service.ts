@@ -105,8 +105,8 @@ export const chatService = {
             .update({ last_message_at: new Date().toISOString() })
             .eq('id', roomId);
 
-        // Broadcast realtime ke layar chat yang sedang terbuka (async, tidak blocking)
-        this.broadcastMessage(roomId, data).catch((err) => {
+        // Broadcast realtime ke layar chat & badge (async, tidak blocking)
+        this.broadcastMessage(roomId, room.order_id, data).catch((err) => {
             logger.warn('Gagal broadcast chat', { err: err.message });
         });
 
@@ -190,7 +190,7 @@ export const chatService = {
             .eq('id', roomId);
 
         // Broadcast realtime
-        this.broadcastMessage(roomId, message).catch((err) => {
+        this.broadcastMessage(roomId, room.order_id, message).catch((err) => {
             logger.warn('Gagal broadcast chat image', { err: err.message });
         });
 
@@ -203,10 +203,41 @@ export const chatService = {
     },
 
     /**
-     * Helper: broadcast pesan baru ke channel Realtime `chat:{roomId}`.
+     * Jumlah pesan belum dibaca untuk satu order (dipakai badge di ikon chat).
+     */
+    async unreadCountByOrder(orderId: number, userId: string) {
+        const { data: room } = await supabaseAdmin
+            .from('chat_rooms')
+            .select('id, customer_id, driver_id, merchant_id')
+            .eq('order_id', orderId)
+            .maybeSingle();
+
+        if (!room) return { room_id: null, unread: 0 };
+
+        const isParticipant =
+            room.customer_id === userId ||
+            room.driver_id === userId ||
+            room.merchant_id === userId;
+        if (!isParticipant) throw ApiError.forbidden();
+
+        const { count, error } = await supabaseAdmin
+            .from('chat_messages')
+            .select('id', { count: 'exact', head: true })
+            .eq('room_id', room.id)
+            .eq('is_read', false)
+            .neq('sender_id', userId);
+
+        if (error) throw ApiError.internal(error.message);
+        return { room_id: room.id, unread: count ?? 0 };
+    },
+
+    /**
+     * Helper: broadcast ke dua channel Realtime:
+     *  - `chat:{roomId}`        → isi pesan, untuk layar chat yang terbuka
+     *  - `order-chat:{orderId}` → sinyal ringan (room_id saja), untuk badge unread
      * Memakai REST API Realtime, jadi tidak butuh JWT khusus di client.
      */
-    async broadcastMessage(roomId: number, message: unknown) {
+    async broadcastMessage(roomId: number, orderId: number, message: unknown) {
         const url = process.env.SUPABASE_URL;
         const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -228,6 +259,12 @@ export const chatService = {
                         topic: `chat:${roomId}`,
                         event: 'new_message',
                         payload: message,
+                        private: false,
+                    },
+                    {
+                        topic: `order-chat:${orderId}`,
+                        event: 'new_message',
+                        payload: { room_id: roomId },
                         private: false,
                     },
                 ],

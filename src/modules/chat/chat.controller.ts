@@ -42,6 +42,12 @@ export const chatController = {
         return ok(res, null, 'Ditandai terbaca');
     }),
 
+    unreadByOrder: asyncHandler(async (req: Request, res: Response) => {
+        const orderId = Number(req.params.orderId);
+        const data = await chatService.unreadCountByOrder(orderId, req.user!.id);
+        return ok(res, data);
+    }),
+
     /**
      * Upload gambar ke chat room.
      * Pakai multer middleware — file di-parse dari multipart/form-data
