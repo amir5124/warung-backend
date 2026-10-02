@@ -7,5 +7,10 @@ const router = Router();
 router.post('/', requireAuth, ratingController.submit);
 router.get('/order/:orderId', requireAuth, ratingController.getByOrder);
 router.get('/driver/:driverId', ratingController.listByDriver);
+router.get(
+    '/customer/:customerId',
+    requireAuth,
+    ratingController.getCustomerStats
+);
 
 export default router;

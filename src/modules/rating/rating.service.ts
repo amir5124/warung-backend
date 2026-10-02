@@ -3,6 +3,9 @@ import { ApiError } from '../../utils/ApiError';
 import { logger } from '../../config/logger';
 
 export const ratingService = {
+    // ============================================================
+    // SUBMIT RATING (2 arah: customer ↔ driver)
+    // ============================================================
     async submit(input: {
         orderId: number;
         reviewerId: string;
@@ -10,7 +13,7 @@ export const ratingService = {
         comment?: string;
         tags?: string[];
     }) {
-        // 1. Ambil order untuk tahu reviewee (driver) + status
+        // 1. Validasi order
         const { data: order, error: oErr } = await supabaseAdmin
             .from('orders')
             .select('id, customer_id, driver_id, status')
@@ -18,24 +21,34 @@ export const ratingService = {
             .single();
 
         if (oErr || !order) throw ApiError.notFound('Order tidak ditemukan');
-        if (order.customer_id !== input.reviewerId) {
-            throw ApiError.forbidden('Bukan ordermu');
-        }
         if (order.status !== 'completed') {
             throw ApiError.badRequest('Order belum selesai');
         }
-        if (!order.driver_id) {
-            throw ApiError.badRequest('Order tidak punya driver');
-        }
 
-        // 2. Upsert rating
+        // 2. Tentukan reviewee (pasti string, atau throw)
+        const revieweeId: string = (() => {
+            if (order.customer_id === input.reviewerId) {
+                // Customer menilai driver
+                if (!order.driver_id) {
+                    throw ApiError.badRequest('Order tidak punya driver');
+                }
+                return order.driver_id;
+            }
+            if (order.driver_id === input.reviewerId) {
+                // Driver menilai customer
+                return order.customer_id;
+            }
+            throw ApiError.forbidden('Bukan ordermu');
+        })();
+
+        // 3. Upsert rating
         const { data: rating, error: rErr } = await supabaseAdmin
             .from('ratings')
             .upsert(
                 {
                     order_id: input.orderId,
                     reviewer_id: input.reviewerId,
-                    reviewee_id: order.driver_id,
+                    reviewee_id: revieweeId,
                     rating: input.rating,
                     comment: input.comment ?? null,
                     tags: input.tags ?? [],
@@ -50,23 +63,52 @@ export const ratingService = {
             throw ApiError.internal(rErr.message);
         }
 
-        // 3. Hitung ulang rating_avg driver
+        // 4. Recalculate stats reviewee
+        await ratingService.recalculateStats(revieweeId);
+
+        return rating;
+    },
+
+    // ============================================================
+    // RECALCULATE STATS (rating_avg + total_trips/total_orders)
+    // ============================================================
+    async recalculateStats(userId: string) {
+        // Ambil semua rating untuk user ini
         const { data: agg, error: aggErr } = await supabaseAdmin
             .from('ratings')
             .select('rating')
-            .eq('reviewee_id', order.driver_id);
+            .eq('reviewee_id', userId);
 
         if (aggErr) {
-            logger.warn('Gagal hitung rating avg', { error: aggErr });
-        } else if (agg && agg.length > 0) {
-            const avg =
-                agg.reduce((s, r: any) => s + (r.rating ?? 0), 0) / agg.length;
+            logger.warn('Gagal hitung rating avg', { error: aggErr, userId });
+            return;
+        }
 
-            // Hitung total order completed driver
+        const reviewCount = agg?.length ?? 0;
+        const avg =
+            reviewCount > 0
+                ? agg!.reduce((s, r: any) => s + (r.rating ?? 0), 0) /
+                reviewCount
+                : 0;
+
+        // Cek role user
+        const { data: profile } = await supabaseAdmin
+            .from('profiles')
+            .select('role')
+            .eq('id', userId)
+            .maybeSingle();
+
+        if (!profile) {
+            logger.warn('Profile tidak ditemukan saat recalc', { userId });
+            return;
+        }
+
+        if (profile.role === 'driver') {
+            // Update driver_profiles: rating_avg + total_trips
             const { count: tripsCount } = await supabaseAdmin
                 .from('orders')
                 .select('id', { count: 'exact', head: true })
-                .eq('driver_id', order.driver_id)
+                .eq('driver_id', userId)
                 .eq('status', 'completed');
 
             await supabaseAdmin
@@ -75,18 +117,48 @@ export const ratingService = {
                     rating_avg: Number(avg.toFixed(2)),
                     total_trips: tripsCount ?? 0,
                 })
-                .eq('user_id', order.driver_id);
+                .eq('user_id', userId);
+
+            // Sync ke profiles juga
+            await supabaseAdmin
+                .from('profiles')
+                .update({
+                    rating_avg: Number(avg.toFixed(2)),
+                })
+                .eq('id', userId);
 
             logger.info('Driver stats updated', {
-                driverId: order.driver_id,
+                driverId: userId,
                 rating_avg: avg,
                 total_trips: tripsCount,
             });
-        }
+        } else {
+            // Update profiles customer: rating_avg + total_orders
+            const { count: ordersCount } = await supabaseAdmin
+                .from('orders')
+                .select('id', { count: 'exact', head: true })
+                .eq('customer_id', userId)
+                .eq('status', 'completed');
 
-        return rating;
+            await supabaseAdmin
+                .from('profiles')
+                .update({
+                    rating_avg: Number(avg.toFixed(2)),
+                    total_orders: ordersCount ?? 0,
+                })
+                .eq('id', userId);
+
+            logger.info('Customer stats updated', {
+                customerId: userId,
+                rating_avg: avg,
+                total_orders: ordersCount,
+            });
+        }
     },
 
+    // ============================================================
+    // GET BY ORDER
+    // ============================================================
     async getByOrder(orderId: number) {
         const { data } = await supabaseAdmin
             .from('ratings')
@@ -96,6 +168,9 @@ export const ratingService = {
         return data;
     },
 
+    // ============================================================
+    // LIST BY DRIVER (rating yang diterima driver)
+    // ============================================================
     async listByDriver(driverId: string, limit = 20) {
         const { data } = await supabaseAdmin
             .from('ratings')
@@ -104,20 +179,51 @@ export const ratingService = {
             .order('created_at', { ascending: false })
             .limit(limit);
 
-        if (!data) return [];
+        if (!data || data.length === 0) return [];
 
-        // Ambil info reviewer terpisah
-        const reviewerIds = [...new Set(data.map((r: any) => r.reviewer_id))];
+        const reviewerIds = [
+            ...new Set(data.map((r: any) => r.reviewer_id)),
+        ];
         const { data: profiles } = await supabaseAdmin
             .from('profiles')
             .select('id, full_name, avatar_url')
             .in('id', reviewerIds);
 
-        const profileMap = new Map((profiles ?? []).map((p: any) => [p.id, p]));
+        const profileMap = new Map(
+            (profiles ?? []).map((p: any) => [p.id, p])
+        );
 
         return data.map((r: any) => ({
             ...r,
             reviewer: profileMap.get(r.reviewer_id) ?? null,
         }));
+    },
+
+    // ============================================================
+    // GET CUSTOMER STATS (untuk driver lihat info customer)
+    // ============================================================
+    async getCustomerStats(customerId: string) {
+        const { data: profile, error } = await supabaseAdmin
+            .from('profiles')
+            .select('id, full_name, avatar_url, rating_avg, total_orders')
+            .eq('id', customerId)
+            .maybeSingle();
+
+        if (error || !profile) return null;
+
+        // Hitung jumlah review yang diterima customer
+        const { count: reviewCount } = await supabaseAdmin
+            .from('ratings')
+            .select('id', { count: 'exact', head: true })
+            .eq('reviewee_id', customerId);
+
+        return {
+            id: profile.id,
+            full_name: profile.full_name,
+            avatar_url: profile.avatar_url,
+            rating_avg: profile.rating_avg ?? 5.0,
+            total_orders: profile.total_orders ?? 0,
+            review_count: reviewCount ?? 0,
+        };
     },
 };

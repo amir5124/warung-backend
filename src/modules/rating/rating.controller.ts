@@ -7,7 +7,10 @@ import { ApiError } from '../../utils/ApiError';
 export const ratingController = {
     submit: asyncHandler(async (req: Request, res: Response) => {
         const { orderId, rating, comment, tags } = req.body;
-        if (!orderId || !rating) throw ApiError.badRequest('orderId dan rating wajib');
+
+        if (!orderId || !rating) {
+            throw ApiError.badRequest('orderId dan rating wajib');
+        }
 
         const data = await ratingService.submit({
             orderId: Number(orderId),
@@ -16,16 +19,31 @@ export const ratingController = {
             comment,
             tags,
         });
+
         return created(res, data, 'Rating tersimpan');
     }),
 
     getByOrder: asyncHandler(async (req: Request, res: Response) => {
-        const data = await ratingService.getByOrder(Number(req.params.orderId));
+        const data = await ratingService.getByOrder(
+            Number(req.params.orderId)
+        );
         return ok(res, data);
     }),
 
     listByDriver: asyncHandler(async (req: Request, res: Response) => {
-        const data = await ratingService.listByDriver(req.params.driverId);
+        const data = await ratingService.listByDriver(
+            req.params.driverId
+        );
+        return ok(res, data);
+    }),
+
+    getCustomerStats: asyncHandler(async (req: Request, res: Response) => {
+        const data = await ratingService.getCustomerStats(
+            req.params.customerId
+        );
+
+        if (!data) throw ApiError.notFound('Customer tidak ditemukan');
+
         return ok(res, data);
     }),
 };
