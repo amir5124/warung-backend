@@ -70,7 +70,7 @@ export const ratingService = {
     },
 
     // ============================================================
-    // RECALCULATE STATS (rating_avg + total_trips/total_orders)
+    // RECALCULATE STATS (rating_avg + total_reviews + total_trips/total_orders)
     // ============================================================
     async recalculateStats(userId: string) {
         // Ambil semua rating untuk user ini
@@ -124,16 +124,18 @@ export const ratingService = {
                 .from('profiles')
                 .update({
                     rating_avg: Number(avg.toFixed(2)),
+                    total_reviews: reviewCount,
                 })
                 .eq('id', userId);
 
             logger.info('Driver stats updated', {
                 driverId: userId,
                 rating_avg: avg,
+                total_reviews: reviewCount,
                 total_trips: tripsCount,
             });
         } else {
-            // Update profiles customer: rating_avg + total_orders
+            // Update profiles customer: rating_avg + total_reviews + total_orders
             const { count: ordersCount } = await supabaseAdmin
                 .from('orders')
                 .select('id', { count: 'exact', head: true })
@@ -144,6 +146,7 @@ export const ratingService = {
                 .from('profiles')
                 .update({
                     rating_avg: Number(avg.toFixed(2)),
+                    total_reviews: reviewCount,
                     total_orders: ordersCount ?? 0,
                 })
                 .eq('id', userId);
@@ -151,6 +154,7 @@ export const ratingService = {
             logger.info('Customer stats updated', {
                 customerId: userId,
                 rating_avg: avg,
+                total_reviews: reviewCount,
                 total_orders: ordersCount,
             });
         }
@@ -163,9 +167,29 @@ export const ratingService = {
         const { data } = await supabaseAdmin
             .from('ratings')
             .select('*')
+            .eq('order_id', orderId);
+        return data ?? [];
+    },
+
+    // ============================================================
+    // GET MINE — rating yang SAYA berikan untuk order ini
+    // ============================================================
+    async getMine(orderId: number, reviewerId: string) {
+        const { data } = await supabaseAdmin
+            .from('ratings')
+            .select('rating, comment, tags')
             .eq('order_id', orderId)
+            .eq('reviewer_id', reviewerId)
             .maybeSingle();
-        return data;
+
+        if (!data) return null;
+
+        return {
+            rating: data.rating as number,
+            message: (data.comment as string | null) ?? null,
+            tags: (data.tags as string[] | null) ?? [],
+            skipped: false,
+        };
     },
 
     // ============================================================

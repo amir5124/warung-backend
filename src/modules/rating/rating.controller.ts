@@ -12,10 +12,15 @@ export const ratingController = {
             throw ApiError.badRequest('orderId dan rating wajib');
         }
 
+        const ratingNum = Number(rating);
+        if (!Number.isFinite(ratingNum) || ratingNum < 1 || ratingNum > 5) {
+            throw ApiError.badRequest('rating harus antara 1 sampai 5');
+        }
+
         const data = await ratingService.submit({
             orderId: Number(orderId),
             reviewerId: req.user!.id,
-            rating: Number(rating),
+            rating: ratingNum,
             comment,
             tags,
         });
@@ -26,6 +31,14 @@ export const ratingController = {
     getByOrder: asyncHandler(async (req: Request, res: Response) => {
         const data = await ratingService.getByOrder(
             Number(req.params.orderId)
+        );
+        return ok(res, data);
+    }),
+
+    getMine: asyncHandler(async (req: Request, res: Response) => {
+        const data = await ratingService.getMine(
+            Number(req.params.orderId),
+            req.user!.id
         );
         return ok(res, data);
     }),
