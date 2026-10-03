@@ -1,75 +1,94 @@
+// src/modules/chat/chat.controller.ts
 import { Request, Response } from 'express';
-import multer from 'multer';
 import { chatService } from './chat.service';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { ok, created } from '../../utils/response';
 import { ApiError } from '../../utils/ApiError';
 
-// Setup multer (memory storage)
-const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024 },     // max 5 MB
-    fileFilter: (_req, file, cb) => {
-        const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
-        if (allowed.includes(file.mimetype)) cb(null, true);
-        else cb(new Error('Hanya file gambar yang diizinkan'));
-    },
-});
-
 export const chatController = {
+    // ============================================================
+    // ROOMS
+    // ============================================================
     openRoom: asyncHandler(async (req: Request, res: Response) => {
-        const orderId = Number(req.params.orderId);
-        const data = await chatService.getOrCreateRoom(orderId, req.user!.id);
+        const data = await chatService.getOrCreateRoom(
+            Number(req.params.orderId),
+            req.user!.id
+        );
         return ok(res, data);
     }),
 
+    // 🆕 List semua room milik user
+    listRooms: asyncHandler(async (req: Request, res: Response) => {
+        const limit = Math.min(Number(req.query.limit ?? 50), 100);
+        const data = await chatService.listRooms(req.user!.id, limit);
+        return ok(res, data);
+    }),
+
+    // ============================================================
+    // MESSAGES
+    // ============================================================
     listMessages: asyncHandler(async (req: Request, res: Response) => {
-        const roomId = Number(req.params.roomId);
-        const data = await chatService.listMessages(roomId, req.user!.id);
+        const limit = Math.min(Number(req.query.limit ?? 100), 200);
+        const data = await chatService.listMessages(
+            Number(req.params.roomId),
+            req.user!.id,
+            limit
+        );
         return ok(res, data);
     }),
 
-    send: asyncHandler(async (req: Request, res: Response) => {
-        const roomId = Number(req.params.roomId);
+    sendMessage: asyncHandler(async (req: Request, res: Response) => {
         const { message, type } = req.body;
-        const data = await chatService.sendMessage(roomId, req.user!.id, message, type);
+        if (!message && type !== 'image') {
+            throw ApiError.badRequest('Pesan tidak boleh kosong');
+        }
+
+        const data = await chatService.sendMessage(
+            Number(req.params.roomId),
+            req.user!.id,
+            message ?? '',
+            type ?? 'text'
+        );
         return created(res, data, 'Pesan terkirim');
     }),
 
     markRead: asyncHandler(async (req: Request, res: Response) => {
-        const roomId = Number(req.params.roomId);
-        await chatService.markRead(roomId, req.user!.id);
-        return ok(res, null, 'Ditandai terbaca');
+        await chatService.markRead(
+            Number(req.params.roomId),
+            req.user!.id
+        );
+        return ok(res, null, 'Pesan ditandai sudah dibaca');
     }),
 
+    // ============================================================
+    // IMAGE
+    // ============================================================
+    uploadImage: asyncHandler(async (req: Request, res: Response) => {
+        if (!req.file) {
+            throw ApiError.badRequest('File tidak ditemukan');
+        }
+
+        const data = await chatService.uploadImage(
+            Number(req.params.roomId),
+            req.user!.id,
+            {
+                buffer: req.file.buffer,
+                mimetype: req.file.mimetype,
+                originalname: req.file.originalname,
+            }
+        );
+
+        return created(res, data, 'Gambar terkirim');
+    }),
+
+    // ============================================================
+    // UNREAD
+    // ============================================================
     unreadByOrder: asyncHandler(async (req: Request, res: Response) => {
-        const orderId = Number(req.params.orderId);
-        const data = await chatService.unreadCountByOrder(orderId, req.user!.id);
+        const data = await chatService.unreadCountByOrder(
+            Number(req.params.orderId),
+            req.user!.id
+        );
         return ok(res, data);
     }),
-
-    /**
-     * Upload gambar ke chat room.
-     * Pakai multer middleware — file di-parse dari multipart/form-data
-     * dengan field name 'image'.
-     */
-    uploadImage: [
-        upload.single('image'),
-        asyncHandler(async (req: Request, res: Response) => {
-            const roomId = Number(req.params.roomId);
-            const file = req.file;
-
-            if (!file) {
-                throw ApiError.badRequest('File gambar wajib diunggah (field: image)');
-            }
-
-            const data = await chatService.uploadImage(roomId, req.user!.id, {
-                buffer: file.buffer,
-                mimetype: file.mimetype,
-                originalname: file.originalname,
-            });
-
-            return created(res, data, 'Gambar terkirim');
-        }),
-    ],
 };
