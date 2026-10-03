@@ -45,20 +45,15 @@ function parseEwkbHex(hex: string): { latitude: number; longitude: number } | nu
     return null;
 }
 
-/**
- * Parse kolom geography apapun (hex EWKB, GeoJSON, WKT, object) jadi { lat, lng }.
- */
 function parseLocation(
     loc: any
 ): { latitude: number; longitude: number } | null {
     if (!loc) return null;
 
-    // 1. Hex EWKB
     if (typeof loc === 'string') {
         const hex = parseEwkbHex(loc);
         if (hex) return hex;
 
-        // WKT: "POINT(lng lat)"
         const m = loc.match(/POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i);
         if (m) {
             return { latitude: Number(m[2]), longitude: Number(m[1]) };
@@ -66,7 +61,6 @@ function parseLocation(
         return null;
     }
 
-    // 2. GeoJSON: { type: 'Point', coordinates: [lng, lat] }
     if (Array.isArray(loc?.coordinates) && loc.coordinates.length >= 2) {
         const [lng, lat] = loc.coordinates;
         if (typeof lat === 'number' && typeof lng === 'number') {
@@ -74,7 +68,6 @@ function parseLocation(
         }
     }
 
-    // 3. Object { latitude, longitude }
     if (
         typeof loc.latitude === 'number' &&
         typeof loc.longitude === 'number'
@@ -226,7 +219,6 @@ export const orderService = {
                 sender_landmark: input.sender_landmark ?? null,
                 receiver_landmark: input.receiver_landmark ?? null,
 
-                // ⬇️ Field paket WarSend
                 package_type: input.package_type ?? null,
                 package_size: input.package_size ?? null,
                 package_weight: input.package_weight ?? null,
@@ -270,6 +262,13 @@ export const orderService = {
             tariffCode
         );
 
+        // ---- 🆕 Ambil customer profile untuk notif ----
+        const { data: custProfile } = await supabaseAdmin
+            .from('profiles')
+            .select('full_name, avatar_url')
+            .eq('id', customerId)
+            .maybeSingle();
+
         const pickupShort = prettyPlace(input.pickup_name);
         const dropoffShort = prettyPlace(input.dropoff_name);
         const jarakText =
@@ -279,9 +278,6 @@ export const orderService = {
         const fareText = `Rp${Number(delivery_fee).toLocaleString('id-ID')}`;
 
         // ---- Notif ke driver ----
-        // Payload `data` harus semua string (FCM requirement).
-        // Kita titipkan ringkasan order supaya driver bisa render modal
-        // tanpa perlu fetch /api/orders/:id (yang akan 403 karena driver_id masih null).
         const orderPayloadForNotif = {
             id: String(order.id),
             order_code: order.order_code,
@@ -307,7 +303,8 @@ export const orderService = {
             payment_method: order.payment_method ?? 'cash',
             tariff_code: order.tariff_code ?? '',
             option_name: order.option_name ?? '',
-            customer_name: 'Customer', // opsional: bisa di-join dari profiles
+            customer_name: custProfile?.full_name ?? 'Customer',
+            customer_avatar: custProfile?.avatar_url ?? '',
         };
 
         for (const d of drivers) {
@@ -320,7 +317,6 @@ export const orderService = {
                         type: 'new_order',
                         tariff_code: tariffCode ?? '',
                         service: input.type,
-                        // ⬇️ TAMBAH: payload order lengkap
                         order: JSON.stringify(orderPayloadForNotif),
                     },
                 });
@@ -352,7 +348,6 @@ export const orderService = {
             }
         }
 
-        // ⬇️ Return shape sama dengan getById() supaya frontend konsisten
         return await orderService.getById(order.id, customerId, 'customer');
     },
 
@@ -370,7 +365,7 @@ export const orderService = {
         if (order.status !== 'pending')
             throw ApiError.conflict('Order already taken');
 
-        // ⬇️ Validasi: driver harus ada di order_bids
+        // ---- Validasi bid ----
         const { data: bid } = await supabaseAdmin
             .from('order_bids')
             .select('id')
@@ -380,9 +375,26 @@ export const orderService = {
             .maybeSingle();
 
         if (!bid) {
-            throw ApiError.forbidden(
-                'Kamu tidak diundang untuk order ini'
+            throw ApiError.forbidden('Kamu tidak diundang untuk order ini');
+        }
+
+        // ---- 🆕 Validasi driver online & verified ----
+        const { data: dp } = await supabaseAdmin
+            .from('driver_profiles')
+            .select('status, is_verified')
+            .eq('user_id', driverId)
+            .maybeSingle();
+
+        if (!dp) {
+            throw ApiError.forbidden('Driver profile tidak ditemukan');
+        }
+        if (dp.status !== 'online') {
+            throw ApiError.badRequest(
+                'Kamu harus online untuk terima order'
             );
+        }
+        if (!dp.is_verified) {
+            throw ApiError.forbidden('Akun belum terverifikasi');
         }
 
         // ---- Update order (race-safe) ----
@@ -413,7 +425,10 @@ export const orderService = {
 
         await supabaseAdmin
             .from('order_bids')
-            .update({ status: 'rejected', responded_at: new Date().toISOString() })
+            .update({
+                status: 'rejected',
+                responded_at: new Date().toISOString(),
+            })
             .eq('order_id', orderId)
             .neq('driver_id', driverId)
             .eq('status', 'pending');
@@ -517,7 +532,6 @@ export const orderService = {
                 reason: status,
             });
 
-            // ⬇️ Cleanup bid yang masih pending
             await supabaseAdmin
                 .from('order_bids')
                 .update({
@@ -547,6 +561,31 @@ export const orderService = {
                 driverId: order.driver_id,
                 total_trips: tripsCount,
             });
+        }
+
+        // ============================================================
+        // WALLET SETTLEMENT — hitung komisi & update saldo/utang
+        // ============================================================
+        if (status === 'completed' && order.driver_id) {
+            try {
+                const { walletService } = await import(
+                    '../wallet/wallet.service'
+                );
+
+                const settlement = await walletService.settleOrder(orderId);
+
+                logger.info('Wallet settled', {
+                    orderId,
+                    driverId: order.driver_id,
+                    settlement,
+                });
+            } catch (err: any) {
+                logger.error('Gagal settle wallet', {
+                    orderId,
+                    driverId: order.driver_id,
+                    error: err.message,
+                });
+            }
         }
 
         // ---- Notif ----
@@ -615,10 +654,12 @@ export const orderService = {
                 } else if (status === 'cancelled') {
                     if (isTargetCustomer) {
                         title = 'Pesanan dibatalkan';
-                        body = reason ?? 'Pesanan dibatalkan oleh driver';
+                        body =
+                            reason ?? 'Pesanan dibatalkan oleh driver';
                     } else if (isTargetDriver) {
                         title = 'Pesanan dibatalkan';
-                        body = reason ?? 'Pesanan dibatalkan oleh customer';
+                        body =
+                            reason ?? 'Pesanan dibatalkan oleh customer';
                     } else {
                         title = 'Pesanan dibatalkan';
                         body = reason ?? 'Pesanan dibatalkan';
@@ -691,44 +732,31 @@ export const orderService = {
                 : Promise.resolve({ data: null }),
         ]);
 
-        // ---- Statistik customer ----
+        // ---- 🆕 Statistik customer dari profiles (efisien) ----
         let customerStats: {
             total_orders: number;
             rating_avg: number | null;
+            review_count: number;
         } | null = null;
+
         if (order.customer_id) {
-            const { count: totalOrders } = await supabaseAdmin
-                .from('orders')
-                .select('id', { count: 'exact', head: true })
-                .eq('customer_id', order.customer_id)
-                .eq('status', 'completed');
-
-            const { data: custRatings } = await supabaseAdmin
-                .from('ratings')
-                .select('rating')
-                .eq('reviewee_id', order.customer_id);
-
-            const ratingAvg =
-                custRatings && custRatings.length > 0
-                    ? Number(
-                        (
-                            custRatings.reduce(
-                                (s, r: any) => s + (r.rating ?? 0),
-                                0
-                            ) / custRatings.length
-                        ).toFixed(2)
-                    )
-                    : null;
+            const { data: custProfile } = await supabaseAdmin
+                .from('profiles')
+                .select('rating_avg, total_orders, total_reviews')
+                .eq('id', order.customer_id)
+                .maybeSingle();
 
             customerStats = {
-                total_orders: totalOrders ?? 0,
-                rating_avg: ratingAvg,
+                total_orders: custProfile?.total_orders ?? 0,
+                rating_avg: custProfile?.rating_avg ?? null,
+                review_count: custProfile?.total_reviews ?? 0,
             };
         }
 
         // ---- Driver profile + coords ----
         let driverProfile: any = null;
-        let driverCoords: { latitude: number; longitude: number } | null = null;
+        let driverCoords: { latitude: number; longitude: number } | null =
+            null;
 
         if (order.driver_id) {
             const { data: dp } = await supabaseAdmin
@@ -755,9 +783,13 @@ export const orderService = {
             }
             : null;
 
+        // ---- 🆕 Customer dengan stats ----
         const customer = customerRes.data
             ? {
                 ...customerRes.data,
+                rating_avg: customerStats?.rating_avg ?? null,
+                total_orders: customerStats?.total_orders ?? 0,
+                total_reviews: customerStats?.review_count ?? 0,
                 stats: customerStats,
             }
             : null;
@@ -779,13 +811,20 @@ export const orderService = {
     // ============================================================
     // LIST BY USER
     // ============================================================
-    async listByUser(userId: string, role: string, status?: string) {
+    async listByUser(
+        userId: string,
+        role: string,
+        status?: string,
+        limit = 50,
+        offset = 0
+    ) {
         let query = supabaseAdmin
             .from('orders')
             .select(
                 '*, customer:profiles!orders_customer_id_fkey(id, full_name, phone, avatar_url)'
             )
-            .order('created_at', { ascending: false });
+            .order('created_at', { ascending: false })
+            .range(offset, offset + limit - 1);
 
         if (role === 'customer') query = query.eq('customer_id', userId);
         else if (role === 'driver') query = query.eq('driver_id', userId);
@@ -799,9 +838,11 @@ export const orderService = {
             let fallback = supabaseAdmin
                 .from('orders')
                 .select('*')
-                .order('created_at', { ascending: false });
+                .order('created_at', { ascending: false })
+                .range(offset, offset + limit - 1);
 
-            if (role === 'customer') fallback = fallback.eq('customer_id', userId);
+            if (role === 'customer')
+                fallback = fallback.eq('customer_id', userId);
             else if (role === 'driver')
                 fallback = fallback.eq('driver_id', userId);
             else if (role === 'merchant')
@@ -814,19 +855,33 @@ export const orderService = {
         return data || [];
     },
 
+    // ============================================================
+    // UPLOAD PACKAGE PHOTO
+    // ============================================================
     async uploadPackagePhoto(
         orderId: number,
         driverId: string,
-        file: Express.Multer.File
+        file: {
+            originalname: string;
+            mimetype: string;
+            buffer: Buffer;
+        }
     ) {
         // 1. Validasi order
-        const { data: order, error: oErr } = await supabaseAdmin
+        const { data: orderRaw, error: oErr } = await supabaseAdmin
             .from('orders')
-            .select('id, driver_id, status, type')
+            .select(
+                'id, type, status, driver_id, customer_id, package_photo_url'
+            )
             .eq('id', orderId)
             .single();
 
-        if (oErr || !order) throw ApiError.notFound('Order tidak ditemukan');
+        if (oErr || !orderRaw) {
+            throw ApiError.notFound('Order tidak ditemukan');
+        }
+
+        const order = orderRaw as any;
+
         if (order.driver_id !== driverId) {
             throw ApiError.forbidden('Bukan order kamu');
         }
@@ -851,7 +906,10 @@ export const orderService = {
             });
 
         if (uploadErr) {
-            logger.error('Upload foto paket gagal', { error: uploadErr, orderId });
+            logger.error('Upload foto paket gagal', {
+                error: uploadErr,
+                orderId,
+            });
             throw ApiError.internal(uploadErr.message);
         }
 
