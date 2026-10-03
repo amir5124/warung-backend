@@ -1,14 +1,13 @@
 import { supabaseAdmin } from '../../config/supabase';
 import { ApiError } from '../../utils/ApiError';
+import { logger } from '../../config/logger';
 
-/**
- * Parse kolom `current_location` (PostGIS geography) dari Supabase.
- * Supabase PostgREST bisa kirim sebagai:
- *  - EWKB hex string: "0101000020E6100000..."
- *  - GeoJSON: { type: 'Point', coordinates: [lng, lat] }
- *  - Object langsung: { latitude, longitude }
- */
-function parseEwkbHex(hex: string): { latitude: number; longitude: number } | null {
+// ============================================================
+// Location parsers
+// ============================================================
+function parseEwkbHex(
+    hex: string
+): { latitude: number; longitude: number } | null {
     if (!hex || typeof hex !== 'string') return null;
     if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length < 50) return null;
 
@@ -42,18 +41,15 @@ function parseEwkbHex(hex: string): { latitude: number; longitude: number } | nu
     return null;
 }
 
-/**
- * Parse nilai location apapun (hex, GeoJSON, object, WKT).
- */
-function parseLocation(loc: any): { latitude: number; longitude: number } | null {
+function parseLocation(
+    loc: any
+): { latitude: number; longitude: number } | null {
     if (!loc) return null;
 
-    // 1. Hex string EWKB
     if (typeof loc === 'string') {
         const fromHex = parseEwkbHex(loc);
         if (fromHex) return fromHex;
 
-        // WKT: "POINT(lng lat)"
         const m = loc.match(/POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i);
         if (m) {
             return { latitude: Number(m[2]), longitude: Number(m[1]) };
@@ -61,7 +57,6 @@ function parseLocation(loc: any): { latitude: number; longitude: number } | null
         return null;
     }
 
-    // 2. GeoJSON: { type: 'Point', coordinates: [lng, lat] }
     if (Array.isArray(loc?.coordinates) && loc.coordinates.length >= 2) {
         const [lng, lat] = loc.coordinates;
         if (typeof lat === 'number' && typeof lng === 'number') {
@@ -69,7 +64,6 @@ function parseLocation(loc: any): { latitude: number; longitude: number } | null
         }
     }
 
-    // 3. Object { latitude, longitude }
     if (typeof loc.latitude === 'number' && typeof loc.longitude === 'number') {
         return { latitude: loc.latitude, longitude: loc.longitude };
     }
@@ -77,7 +71,13 @@ function parseLocation(loc: any): { latitude: number; longitude: number } | null
     return null;
 }
 
+// ============================================================
+// Service
+// ============================================================
 export const driverService = {
+    // ============================================================
+    // UPDATE LOCATION
+    // ============================================================
     async updateLocation(driverId: string, lat: number, lng: number) {
         const { error } = await supabaseAdmin.rpc('update_driver_location', {
             p_driver_id: driverId,
@@ -87,24 +87,59 @@ export const driverService = {
 
         // Fallback kalau RPC belum dibuat
         if (error) {
-            await supabaseAdmin
+            logger.warn('RPC update_driver_location gagal, pakai fallback', {
+                error: error.message,
+                driverId,
+            });
+
+            const { error: fallbackErr } = await supabaseAdmin
                 .from('driver_profiles')
                 .update({
                     current_location: `POINT(${lng} ${lat})`,
                     location_updated_at: new Date().toISOString(),
                 })
                 .eq('user_id', driverId);
+
+            if (fallbackErr) {
+                logger.error('Fallback update location gagal', {
+                    error: fallbackErr,
+                    driverId,
+                });
+                throw ApiError.internal(fallbackErr.message);
+            }
         }
     },
 
+    // ============================================================
+    // SET STATUS (online/offline/busy)
+    // ============================================================
     async setStatus(driverId: string, status: 'offline' | 'online' | 'busy') {
+        // Validasi: driver tidak bisa online kalau masih punya order aktif
+        if (status === 'online' || status === 'offline') {
+            const { count: activeOrders } = await supabaseAdmin
+                .from('orders')
+                .select('id', { count: 'exact', head: true })
+                .eq('driver_id', driverId)
+                .in('status', ['accepted', 'arrived', 'in_progress']);
+
+            if ((activeOrders ?? 0) > 0) {
+                throw ApiError.badRequest(
+                    'Selesaikan order aktif dulu sebelum ubah status'
+                );
+            }
+        }
+
         const { error } = await supabaseAdmin
             .from('driver_profiles')
             .update({ status })
             .eq('user_id', driverId);
+
         if (error) throw ApiError.internal(error.message);
     },
 
+    // ============================================================
+    // UPDATE PROFILE
+    // ============================================================
     async updateProfile(driverId: string, patch: Record<string, any>) {
         const { data, error } = await supabaseAdmin
             .from('driver_profiles')
@@ -112,18 +147,24 @@ export const driverService = {
             .eq('user_id', driverId)
             .select()
             .single();
+
         if (error) throw ApiError.internal(error.message);
         return data;
     },
 
+    // ============================================================
+    // UPDATE SERVICES
+    // ============================================================
     async updateServices(driverId: string, services: string[]) {
-        // Validasi: hanya boleh layanan yang ada di tabel tariffs
+        // Validasi: hanya layanan yang ada di tabel tariffs
         const { data: validTariffs } = await supabaseAdmin
             .from('tariffs')
             .select('code')
             .eq('is_active', true);
 
-        const validCodes = new Set((validTariffs ?? []).map((t: any) => t.code));
+        const validCodes = new Set(
+            (validTariffs ?? []).map((t: any) => t.code)
+        );
         const filtered = services.filter((s) => validCodes.has(s));
 
         if (filtered.length === 0) {
@@ -141,6 +182,9 @@ export const driverService = {
         return data;
     },
 
+    // ============================================================
+    // GET EARNINGS (with wallet info)
+    // ============================================================
     async getEarnings(driverId: string) {
         const now = new Date();
 
@@ -148,26 +192,24 @@ export const driverService = {
         const startOfToday = new Date(now);
         startOfToday.setHours(0, 0, 0, 0);
 
-        // Awal minggu ini (Senin 00:00)
+        // Awal minggu (Senin 00:00)
         const startOfWeek = new Date(now);
-        const day = startOfWeek.getDay(); // 0=Minggu, 1=Senin
-        const diff = day === 0 ? 6 : day - 1; // kalau Minggu, mundur 6 hari ke Senin
+        const day = startOfWeek.getDay();
+        const diff = day === 0 ? 6 : day - 1;
         startOfWeek.setDate(startOfWeek.getDate() - diff);
         startOfWeek.setHours(0, 0, 0, 0);
 
-        // Awal bulan ini
+        // Awal bulan
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-        // Query semua order completed milik driver ini
+        // Query orders completed
         const { data: orders, error } = await supabaseAdmin
             .from('orders')
             .select('driver_earning, completed_at, status')
             .eq('driver_id', driverId)
             .eq('status', 'completed');
 
-        if (error) {
-            throw new Error(error.message);
-        }
+        if (error) throw ApiError.internal(error.message);
 
         const rows = orders ?? [];
 
@@ -192,7 +234,7 @@ export const driverService = {
         const week = sumSince(startOfWeek);
         const month = sumSince(startOfMonth);
 
-        // Pending: order yang sudah accepted/arrived/in_progress tapi belum completed
+        // Pending: order aktif
         const { data: pendingOrders } = await supabaseAdmin
             .from('orders')
             .select('driver_earning')
@@ -204,72 +246,112 @@ export const driverService = {
             0
         );
 
+        // 🆕 Ambil wallet info
+        const { data: wallet } = await supabaseAdmin
+            .from('driver_wallets')
+            .select(
+                'balance, cash_debt, total_earning, total_commission_paid, total_commission_owed'
+            )
+            .eq('driver_id', driverId)
+            .maybeSingle();
+
+        const walletBalance = Number(wallet?.balance ?? 0);
+        const cashDebt = Number(wallet?.cash_debt ?? 0);
+
+        // Pending payout (dana yang sedang ditarik)
+        const { data: payouts } = await supabaseAdmin
+            .from('payouts')
+            .select('amount')
+            .eq('driver_id', driverId)
+            .in('status', ['pending', 'processing']);
+
+        const pendingPayout = (payouts ?? []).reduce(
+            (sum, p: any) => sum + Number(p.amount ?? 0),
+            0
+        );
+
         return {
-            today,
-            week,
-            month,
-            total,
-            pending,
+            // Earning per periode
+            today: Math.round(today),
+            week: Math.round(week),
+            month: Math.round(month),
+            total: Math.round(total),
+            pending: Math.round(pending),
+
+            // 🆕 Wallet info
+            balance: walletBalance,
+            cash_debt: cashDebt,
+            net_balance: walletBalance - cashDebt,
+            total_commission_paid: Number(wallet?.total_commission_paid ?? 0),
+            total_commission_owed: Number(wallet?.total_commission_owed ?? 0),
+            pending_payout: Math.round(pendingPayout),
         };
     },
 
+    // ============================================================
+    // GET EARNINGS HISTORY
+    // ============================================================
     async getEarningsHistory(driverId: string, limit = 50, offset = 0) {
         const { data, error } = await supabaseAdmin
             .from('orders')
             .select(
-                'id, order_code, type, dropoff_name, pickup_name, driver_earning, completed_at, tariff_code, option_name'
+                `
+                id, order_code, type, dropoff_name, pickup_name,
+                driver_earning, completed_at, tariff_code, option_name,
+                commission_amount, settlement_type, payment_method
+                `
             )
             .eq('driver_id', driverId)
             .eq('status', 'completed')
             .order('completed_at', { ascending: false })
             .range(offset, offset + limit - 1);
 
-        if (error) {
-            throw new Error(error.message);
-        }
-
+        if (error) throw ApiError.internal(error.message);
         return data ?? [];
     },
 
+    // ============================================================
+    // GET PROFILE
+    // ============================================================
     async getProfile(driverId: string) {
         const { data, error } = await supabaseAdmin
             .from('driver_profiles')
             .select('*')
             .eq('user_id', driverId)
             .single();
+
         if (error) throw ApiError.internal(error.message);
         return data;
     },
 
-    /**
-     * Driver online di sekitar titik tertentu.
-     * Return data lengkap: id, nama, avatar, kendaraan, plat, rating, jarak, coords.
-     */
+    // ============================================================
+    // NEARBY DRIVERS
+    // ============================================================
     async nearbyDrivers(
         lat: number,
         lng: number,
         radius = 5000,
         limit = 50
     ) {
-        // 1. Cari driver terdekat lewat RPC
-        const { data, error } = await supabaseAdmin.rpc('find_nearby_drivers', {
-            p_lat: lat,
-            p_lng: lng,
-            p_radius_m: radius,
-            p_limit: limit,
-        });
+        const { data, error } = await supabaseAdmin.rpc(
+            'find_nearby_drivers',
+            {
+                p_lat: lat,
+                p_lng: lng,
+                p_radius_m: radius,
+                p_limit: limit,
+            }
+        );
         if (error) throw ApiError.internal(error.message);
         if (!data || data.length === 0) return [];
 
         const driverIds = data.map((d: any) => d.user_id);
 
-        // 2. Ambil profiles (nama, avatar)
         const { data: profiles } = await supabaseAdmin
             .from('profiles')
             .select('id, full_name, avatar_url')
             .in('id', driverIds);
 
-        // 3. Ambil driver_profiles (kendaraan, plat, rating, current_location)
         const { data: driverProfiles } = await supabaseAdmin
             .from('driver_profiles')
             .select(
@@ -284,7 +366,6 @@ export const driverService = {
             (driverProfiles ?? []).map((d: any) => [d.user_id, d])
         );
 
-        // 4. Gabungkan
         return data
             .map((d: any) => {
                 const profile = profileMap.get(d.user_id);
@@ -301,10 +382,9 @@ export const driverService = {
                     rating_avg: dp?.rating_avg ?? 5,
                     total_trips: dp?.total_trips ?? 0,
                     distance_m: d.distance_m,
-                    coords,   // { latitude, longitude } atau null
+                    coords,
                 };
             })
-            .filter((d: any) => d.coords);   // hanya yang punya koordinat valid
+            .filter((d: any) => d.coords);
     },
 };
-

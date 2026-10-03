@@ -6,11 +6,33 @@ import {
     updateLocationSchema,
     updateStatusSchema,
     updateDriverSchema,
-    updateServicesSchema
+    updateServicesSchema,
 } from './driver.schema';
 
 const router = Router();
 
+// ============================================================
+// Endpoint PUBLIK
+// ============================================================
+router.get('/nearby', driverController.nearby);
+
+// ============================================================
+// Endpoint DRIVER ONLY
+// ============================================================
+router.get(
+    '/profile',
+    requireAuth,
+    requireRole('driver'),
+    driverController.getProfile
+);
+
+router.put(
+    '/profile',
+    requireAuth,
+    requireRole('driver'),
+    validate(updateDriverSchema),
+    driverController.updateProfile
+);
 
 router.put(
     '/services',
@@ -20,32 +42,6 @@ router.put(
     driverController.updateServices
 );
 
-router.get(
-    '/profile',
-    requireAuth,
-    requireRole('driver'),
-    driverController.getProfile
-);
-
-// Earnings
-router.get(
-    '/earnings',
-    requireAuth,
-    requireRole('driver'),
-    driverController.getEarnings
-);
-
-router.get(
-    '/earnings/history',
-    requireAuth,
-    requireRole('driver'),
-    driverController.getEarningsHistory
-);
-// Endpoint PUBLIK: customer bisa lihat driver di sekitar
-// Kalau mau butuh login, tinggal tambah requireAuth
-router.get('/nearby', driverController.nearby);
-
-// Endpoint DRIVER only
 router.put(
     '/location',
     requireAuth,
@@ -62,13 +58,18 @@ router.put(
     driverController.setStatus
 );
 
-router.put(
-    '/profile',
+router.get(
+    '/earnings',
     requireAuth,
     requireRole('driver'),
-    validate(updateDriverSchema),
-    driverController.updateProfile
+    driverController.getEarnings
 );
 
+router.get(
+    '/earnings/history',
+    requireAuth,
+    requireRole('driver'),
+    driverController.getEarningsHistory
+);
 
 export default router;

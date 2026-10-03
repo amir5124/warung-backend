@@ -2,8 +2,14 @@ import { z } from 'zod';
 
 export const updateLocationSchema = z.object({
     body: z.object({
-        latitude: z.number(),
-        longitude: z.number(),
+        latitude: z
+            .number()
+            .min(-90, 'Latitude tidak valid')
+            .max(90, 'Latitude tidak valid'),
+        longitude: z
+            .number()
+            .min(-180, 'Longitude tidak valid')
+            .max(180, 'Longitude tidak valid'),
     }),
 });
 
@@ -16,16 +22,19 @@ export const updateStatusSchema = z.object({
 export const updateDriverSchema = z.object({
     body: z.object({
         vehicle_type: z.enum(['motor', 'mobil', 'motor_food']).optional(),
-        plate_number: z.string().optional(),
-        vehicle_brand: z.string().optional(),
-        vehicle_model: z.string().optional(),
-        sim_number: z.string().optional(),
-        ktp_number: z.string().optional(),
+        plate_number: z.string().trim().min(1).max(20).optional(),
+        vehicle_brand: z.string().trim().min(1).max(50).optional(),
+        vehicle_model: z.string().trim().min(1).max(50).optional(),
+        sim_number: z.string().trim().min(1).max(30).optional(),
+        ktp_number: z.string().trim().min(1).max(30).optional(),
     }),
 });
 
 export const updateServicesSchema = z.object({
     body: z.object({
-        services: z.array(z.string()).min(1, 'Pilih minimal 1 layanan'),
+        services: z
+            .array(z.string())
+            .min(1, 'Pilih minimal 1 layanan')
+            .max(20, 'Maksimal 20 layanan'),
     }),
 });

@@ -17,12 +17,18 @@ export const driverController = {
     }),
 
     updateProfile: asyncHandler(async (req: Request, res: Response) => {
-        const data = await driverService.updateProfile(req.user!.id, req.body);
+        const data = await driverService.updateProfile(
+            req.user!.id,
+            req.body
+        );
         return ok(res, data);
     }),
 
     updateServices: asyncHandler(async (req: Request, res: Response) => {
-        const data = await driverService.updateServices(req.user!.id, req.body.services);
+        const data = await driverService.updateServices(
+            req.user!.id,
+            req.body.services
+        );
         return ok(res, data, 'Layanan diperbarui');
     }),
 
@@ -32,8 +38,9 @@ export const driverController = {
     }),
 
     getEarningsHistory: asyncHandler(async (req: Request, res: Response) => {
-        const limit = Number(req.query.limit ?? 50);
-        const offset = Number(req.query.offset ?? 0);
+        const limit = Math.min(Number(req.query.limit ?? 50), 100);
+        const offset = Math.max(Number(req.query.offset ?? 0), 0);
+
         const data = await driverService.getEarningsHistory(
             req.user!.id,
             limit,
@@ -50,14 +57,19 @@ export const driverController = {
     nearby: asyncHandler(async (req: Request, res: Response) => {
         const lat = Number(req.query.lat);
         const lng = Number(req.query.lng);
-        const radius = Number(req.query.radius ?? 5000);
-        const limit = Number(req.query.limit ?? 50);
+        const radius = Math.min(Number(req.query.radius ?? 5000), 50000);
+        const limit = Math.min(Number(req.query.limit ?? 50), 100);
 
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
             throw ApiError.badRequest('Query lat dan lng wajib diisi');
         }
 
-        const data = await driverService.nearbyDrivers(lat, lng, radius, limit);
+        const data = await driverService.nearbyDrivers(
+            lat,
+            lng,
+            radius,
+            limit
+        );
         return ok(res, data);
     }),
 };
