@@ -1017,9 +1017,21 @@ class WalletService {
     }
 
     generateExpiredTimestamp(minutes = 15) {
-        const d = new Date(Date.now() + minutes * 60 * 1000);
+        // Waktu sekarang dalam WIB (UTC+7)
+        const nowWIB = new Date(Date.now() + 7 * 60 * 60 * 1000);
+
+        // Tambah durasi expired
+        nowWIB.setMinutes(nowWIB.getMinutes() + minutes);
+
         const pad = (n: number) => n.toString().padStart(2, '0');
-        return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+        return (
+            nowWIB.getUTCFullYear() +
+            pad(nowWIB.getUTCMonth() + 1) +
+            pad(nowWIB.getUTCDate()) +
+            pad(nowWIB.getUTCHours()) +
+            pad(nowWIB.getUTCMinutes()) +
+            pad(nowWIB.getUTCSeconds())
+        );
     }
 
     parseExpiredToDate(expired: string): string {
