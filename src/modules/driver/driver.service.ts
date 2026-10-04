@@ -114,7 +114,29 @@ export const driverService = {
     // SET STATUS (online/offline/busy)
     // ============================================================
     async setStatus(driverId: string, status: 'offline' | 'online' | 'busy') {
-        // Validasi: driver tidak bisa online kalau masih punya order aktif
+        // 🆕 Kalau mau online, cek is_verified
+        if (status === 'online') {
+            const { data: dp } = await supabaseAdmin
+                .from('driver_profiles')
+                .select('is_verified')
+                .eq('user_id', driverId)
+                .maybeSingle();
+
+            if (!dp) {
+                throw ApiError.notFound('Driver profile tidak ditemukan');
+            }
+
+            if (!dp.is_verified) {
+                logger.warn('[driver.setStatus] Driver belum verified', {
+                    driverId,
+                });
+                throw ApiError.forbidden(
+                    'Akun belum terverifikasi. Upload dokumen dulu.'
+                );
+            }
+        }
+
+        // Cek juga kalau masih ada order aktif
         if (status === 'online' || status === 'offline') {
             const { count: activeOrders } = await supabaseAdmin
                 .from('orders')
