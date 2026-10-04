@@ -434,14 +434,51 @@ export const driverService = {
     // ============================================================
     // GET PROFILE
     // ============================================================
+    // ✅ SESUDAH — auto-heal
     async getProfile(driverId: string) {
         const { data, error } = await supabaseAdmin
             .from('driver_profiles')
             .select('*')
             .eq('user_id', driverId)
-            .single();
+            .maybeSingle();         // ⬅️ return null, tidak error
 
-        if (error) throw ApiError.internal(error.message);
+        if (error) {
+            logger.warn('[driver.getProfile] Query error', {
+                driverId,
+                error: error.message,
+            });
+            return null;
+        }
+
+        // 🆕 Auto-create kalau belum ada
+        if (!data) {
+            logger.info('[driver.getProfile] Auto-create', { driverId });
+
+            const { data: created, error: createErr } = await supabaseAdmin
+                .from('driver_profiles')
+                .insert({
+                    user_id: driverId,
+                    vehicle_type: 'motor',
+                    status: 'offline',
+                    is_verified: false,
+                    services: [],
+                    rating_avg: 5.0,
+                    total_trips: 0,
+                })
+                .select()
+                .single();
+
+            if (createErr) {
+                logger.error('[driver.getProfile] Gagal auto-create', {
+                    driverId,
+                    error: createErr.message,
+                });
+                return null;
+            }
+
+            return created;
+        }
+
         return data;
     },
 

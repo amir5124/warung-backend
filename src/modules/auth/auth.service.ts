@@ -88,10 +88,9 @@ export const authService = {
     async me(userId: string) {
         const { data, error } = await supabaseAdmin
             .from('profiles')
-            .select('*, driver_profiles(*), merchant_profiles(*), wallets(*)')
+            .select('*')
             .eq('id', userId)
-            .single();
-        if (error) logger.warn('Fetch profile failed', { userId, error: error.message });
+            .maybeSingle();       // ⬅️ ganti dari .single()
         return data;
-    },
+    }
 };
