@@ -141,6 +141,53 @@ export const driverService = {
     // UPDATE PROFILE
     // ============================================================
     async updateProfile(driverId: string, patch: Record<string, any>) {
+        // 🆕 Validasi vehicle_type
+        if (patch.vehicle_type !== undefined) {
+            if (!['motor', 'mobil'].includes(patch.vehicle_type)) {
+                throw ApiError.badRequest(
+                    'Tipe kendaraan tidak valid. Hanya "motor" atau "mobil".'
+                );
+            }
+        }
+
+        // 🆕 Validasi tambahan: kalau ganti ke mobil, cek services
+        // (motor bisa semua, mobil cuma WarCar)
+        if (patch.vehicle_type === 'mobil') {
+            const { data: current } = await supabaseAdmin
+                .from('driver_profiles')
+                .select('services')
+                .eq('user_id', driverId)
+                .maybeSingle();
+
+            if (current?.services) {
+                // Cek apakah ada service motor-only yang tidak kompatibel
+                const motorOnlyServices = [
+                    'warjek_s',
+                    'warjek_l',
+                    'warsend_s',
+                    'warsend_l',
+                    'warfood',
+                ];
+                const incompatible = current.services.filter((s: string) =>
+                    motorOnlyServices.includes(s)
+                );
+
+                if (incompatible.length > 0) {
+                    logger.warn('[driver.updateProfile] Ganti ke mobil dengan services motor', {
+                        driverId,
+                        incompatible,
+                    });
+                    // Optional: auto-hapus services yang tidak cocok
+                    // atau throw error. Di sini kita throw supaya user konfirmasi dulu.
+                    throw ApiError.badRequest(
+                        `Kamu perlu ubah layanan dulu sebelum ganti ke mobil. ` +
+                        `Layanan yang tidak cocok: ${incompatible.join(', ')}. ` +
+                        `Buka Edit Layanan dulu.`
+                    );
+                }
+            }
+        }
+
         const { data, error } = await supabaseAdmin
             .from('driver_profiles')
             .update(patch)
@@ -156,7 +203,7 @@ export const driverService = {
     // UPDATE SERVICES
     // ============================================================
     async updateServices(driverId: string, services: string[]) {
-        // Validasi: hanya layanan yang ada di tabel tariffs
+        // 1. Validasi tariff code
         const { data: validTariffs } = await supabaseAdmin
             .from('tariffs')
             .select('code')
@@ -171,9 +218,61 @@ export const driverService = {
             throw ApiError.badRequest('Pilih minimal 1 layanan valid');
         }
 
+        // 🆕 2. Cek vehicle_type driver
+        const { data: driver } = await supabaseAdmin
+            .from('driver_profiles')
+            .select('vehicle_type')
+            .eq('user_id', driverId)
+            .maybeSingle();
+
+        if (!driver) {
+            throw ApiError.notFound('Driver profile tidak ditemukan');
+        }
+
+        // 🆕 3. Mapping service → kendaraan yang cocok
+        // (samakan dengan frontend edit-services.tsx)
+        const SERVICE_VEHICLE_RULES: Record<string, ('motor' | 'mobil')[]> = {
+            warjek_s: ['motor'],
+            warjek_l: ['motor'],
+            warsend_s: ['motor'],
+            warsend_l: ['motor'],
+            warfood: ['motor'],         // 🆕 motor bisa WarFood
+            warcar_s: ['mobil'],
+            warcar_l: ['mobil'],
+        };
+
+        // 🆕 4. Filter service yang tidak cocok dengan kendaraan
+        const vehicleType = driver.vehicle_type as 'motor' | 'mobil' | null;
+        const incompatible: string[] = [];
+
+        const finalServices = filtered.filter((code) => {
+            const allowed = SERVICE_VEHICLE_RULES[code];
+            if (!allowed) return true;   // service tidak ada rule → allow (safety)
+            if (!vehicleType) return true; // driver belum set kendaraan
+            const ok = allowed.includes(vehicleType);
+            if (!ok) incompatible.push(code);
+            return ok;
+        });
+
+        if (incompatible.length > 0) {
+            logger.warn('[driver.updateServices] Service tidak cocok dengan kendaraan', {
+                driverId,
+                vehicleType,
+                incompatible,
+            });
+        }
+
+        if (finalServices.length === 0) {
+            throw ApiError.badRequest(
+                `Tidak ada layanan yang cocok dengan kendaraan "${vehicleType}". ` +
+                `Pilih layanan yang sesuai.`
+            );
+        }
+
+        // 5. Update
         const { data, error } = await supabaseAdmin
             .from('driver_profiles')
-            .update({ services: filtered })
+            .update({ services: finalServices })
             .eq('user_id', driverId)
             .select()
             .single();

@@ -21,7 +21,7 @@ export const updateStatusSchema = z.object({
 
 export const updateDriverSchema = z.object({
     body: z.object({
-        vehicle_type: z.enum(['motor', 'mobil', 'motor_food']).optional(),
+        vehicle_type: z.enum(['motor', 'mobil']).optional(),
         plate_number: z.string().trim().min(1).max(20).optional(),
         vehicle_brand: z.string().trim().min(1).max(50).optional(),
         vehicle_model: z.string().trim().min(1).max(50).optional(),
