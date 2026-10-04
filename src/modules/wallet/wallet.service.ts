@@ -428,11 +428,16 @@ class WalletService {
     // ============================================================
     // TOPUP — INQUIRY (VA / QRIS)
     // ============================================================
+    // ============================================================
+    // TOPUP — INQUIRY (VA / QRIS)
+    // ============================================================
     async topupInquiry(userId: string, dto: {
         amount: number;
         method: 'va' | 'qris';
         bank_code?: string;
     }) {
+        console.log('🚀 [topupInquiry] START', { userId, dto });
+
         if (dto.amount < 10000) throw ApiError.badRequest('Minimal topup Rp10.000');
 
         const partnerReff = `TOPUP-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
@@ -483,62 +488,78 @@ class WalletService {
             };
         }
 
-        try {
-            // ============================================================
-            // FETCH (ganti axios)
-            // ============================================================
-            const response = await fetch(
-                `${LINKQU_CONFIG.baseUrl}${endpoint}`,
-                {
-                    method: 'POST',
-                    headers: {
-                        'client-id': LINKQU_CONFIG.clientId,
-                        'client-secret': LINKQU_CONFIG.clientSecret,
-                        'Content-Type': 'text/plain',
-                        // User-Agent browser biar lolos Cloudflare WAF
-                        'User-Agent':
-                            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        Accept: 'application/json, text/plain, */*',
-                        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-                    },
-                    body: JSON.stringify(payload),
-                }
-            );
+        const url = `${LINKQU_CONFIG.baseUrl}${endpoint}`;
+        console.log('📤 [LINKQU REQUEST]', { url, payload });
 
-            // Cek status HTTP
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'client-id': LINKQU_CONFIG.clientId,
+                    'client-secret': LINKQU_CONFIG.clientSecret,
+                    'Content-Type': 'text/plain',
+                    'User-Agent':
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    Accept: 'application/json, text/plain, */*',
+                    'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+                },
+                body: JSON.stringify(payload),
+            });
+
+            console.log('📥 [LINKQU HTTP]', response.status, response.statusText);
+
+            // Baca body SEKALI saja
+            const rawText = await response.text();
+            console.log('📥 [LINKQU RAW]', rawText);
+
             if (!response.ok) {
-                const text = await response.text();
+                console.error('❌ [LINKQU ERROR]', response.status, rawText.slice(0, 500));
                 logger.error('Topup HTTP error', {
                     status: response.status,
-                    body: text.slice(0, 500),
+                    body: rawText.slice(0, 500),
                 });
                 throw ApiError.internal(
-                    `LinkQu error ${response.status}: ${text.slice(0, 200)}`
+                    `LinkQu error ${response.status}: ${rawText.slice(0, 200)}`
                 );
             }
 
             // Parse JSON
-            const data: any = await response.json();
+            let data: any;
+            try {
+                data = JSON.parse(rawText);
+            } catch {
+                console.error('❌ [LINKQU] Response bukan JSON:', rawText);
+                throw ApiError.internal('Response LinkQu tidak valid');
+            }
+
+            console.log('✅ [LINKQU PARSED]', JSON.stringify(data, null, 2));
 
             // Simpan ke DB
-            await supabaseAdmin.from('wallet_topups').insert({
-                user_id: userId,
-                partner_reff: partnerReff,
-                method: dto.method,
-                amount: dto.amount,
-                bank_code: dto.bank_code ?? null,
-                va_number: data?.virtual_account ?? null,
-                qris_url: data?.imageqris ?? null,
-                status: 'PENDING',
-                raw_response: data,
-                expired_at: this.parseExpiredToDate(expired),
-            });
+            const { error: dbErr } = await supabaseAdmin
+                .from('wallet_topups')
+                .insert({
+                    user_id: userId,
+                    partner_reff: partnerReff,
+                    method: dto.method,
+                    amount: dto.amount,
+                    bank_code: dto.bank_code ?? null,
+                    va_number: data?.virtual_account ?? null,
+                    qris_url: data?.imageqris ?? null,
+                    status: 'PENDING',
+                    raw_response: data,
+                    expired_at: this.parseExpiredToDate(expired),
+                });
+
+            if (dbErr) {
+                console.error('❌ [DB] Insert wallet_topups gagal:', dbErr);
+                logger.error('Insert wallet_topups gagal', { error: dbErr });
+            }
 
             return { ...data, partner_reff: partnerReff };
         } catch (err: any) {
-            // Kalau error dari ApiError, lempar ulang
             if (err instanceof ApiError) throw err;
 
+            console.error('💥 [topupInquiry] ERROR:', err);
             logger.error('Topup inquiry error', {
                 error: err?.message ?? err,
             });
@@ -550,6 +571,8 @@ class WalletService {
     // TOPUP — CHECK STATUS ke LinkQu
     // ============================================================
     async topupExecute(userId: string, partnerReff: string) {
+        console.log('🔍 [topupExecute] START', { userId, partnerReff });
+
         const { data: topup } = await supabaseAdmin
             .from('wallet_topups')
             .select('*')
@@ -558,26 +581,86 @@ class WalletService {
             .single();
 
         if (!topup) throw ApiError.notFound('Topup tidak ditemukan');
-        if (topup.status === 'SUCCESS') return { status: 'SUCCESS', message: 'Sudah dibayar' };
+        if (topup.status === 'SUCCESS') {
+            return { status: 'SUCCESS', message: 'Sudah dibayar' };
+        }
+
+        // Bangun URL dengan query string
+        const url = new URL(
+            `${LINKQU_CONFIG.baseUrl}/transaction/payment/checkstatus`
+        );
+        url.searchParams.set('username', LINKQU_CONFIG.username);
+        url.searchParams.set('partnerreff', partnerReff);
+
+        console.log('📤 [LINKQU REQUEST]', { url: url.toString() });
 
         try {
-            const response = await axios.get(
-                `${LINKQU_CONFIG.baseUrl}/transaction/payment/checkstatus`,
-                {
-                    params: { username: LINKQU_CONFIG.username, partnerreff: partnerReff },
-                    headers: {
-                        'client-id': LINKQU_CONFIG.clientId,
-                        'client-secret': LINKQU_CONFIG.clientSecret,
-                    },
-                }
-            );
-            return response.data;
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                headers: {
+                    'client-id': LINKQU_CONFIG.clientId,
+                    'client-secret': LINKQU_CONFIG.clientSecret,
+                    'User-Agent':
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    Accept: 'application/json, text/plain, */*',
+                    'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+                },
+            });
+
+            console.log('📥 [LINKQU HTTP]', response.status, response.statusText);
+
+            const rawText = await response.text();
+            console.log('📥 [LINKQU RAW]', rawText);
+
+            if (!response.ok) {
+                console.error('❌ [LINKQU ERROR]', response.status, rawText.slice(0, 500));
+                logger.error('Topup execute HTTP error', {
+                    status: response.status,
+                    body: rawText.slice(0, 500),
+                });
+                throw ApiError.internal(
+                    `LinkQu error ${response.status}: ${rawText.slice(0, 200)}`
+                );
+            }
+
+            let data: any;
+            try {
+                data = JSON.parse(rawText);
+            } catch {
+                console.error('❌ [LINKQU] Response bukan JSON:', rawText);
+                throw ApiError.internal('Response LinkQu tidak valid');
+            }
+
+            console.log('✅ [LINKQU PARSED]', JSON.stringify(data, null, 2));
+
+            // Update status di DB kalau LinkQu bilang SUCCESS
+            const statusFromLinkqu = data?.status;
+            if (
+                statusFromLinkqu === 'SUCCESS' ||
+                statusFromLinkqu === 'SETTLED' ||
+                statusFromLinkqu === 'PAID'
+            ) {
+                await supabaseAdmin
+                    .from('wallet_topups')
+                    .update({
+                        status: 'SUCCESS',
+                        updated_at: new Date().toISOString(),
+                    })
+                    .eq('partner_reff', partnerReff);
+                console.log('✅ [DB] Topup ditandai SUCCESS');
+            }
+
+            return data;
         } catch (err: any) {
-            logger.error('Topup execute error', { error: err.response?.data || err.message });
+            if (err instanceof ApiError) throw err;
+
+            console.error('💥 [topupExecute] ERROR:', err);
+            logger.error('Topup execute error', {
+                error: err?.message ?? err,
+            });
             throw ApiError.internal('Gagal cek status topup');
         }
     }
-
     // ============================================================
     // TOPUP — GET STATUS dari DB
     // ============================================================
