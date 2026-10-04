@@ -94,7 +94,7 @@ router.post(
         { name: 'ktp', maxCount: 1 },
         { name: 'sim', maxCount: 1 },
         { name: 'stnk', maxCount: 1 },
-        { name: 'selfie', maxCount: 1 },
+        { name: 'selfie', maxCount: 1 },   // 🆕 tambah
     ]),
     driverController.submitVerification
 );

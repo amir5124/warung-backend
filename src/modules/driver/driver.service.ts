@@ -499,7 +499,6 @@ export const driverService = {
             selfie?: Express.Multer.File;
         }
     ) {
-        // 1. Cek driver profile
         const { data: dp } = await supabaseAdmin
             .from('driver_profiles')
             .select('user_id')
@@ -508,7 +507,7 @@ export const driverService = {
 
         if (!dp) throw ApiError.notFound('Driver profile tidak ditemukan');
 
-        // 2. Upload file ke Supabase Storage
+        // 🆕 Upload file → simpan PATH (bukan URL)
         const uploadFile = async (
             file: Express.Multer.File,
             prefix: string
@@ -525,30 +524,43 @@ export const driverService = {
 
             if (error) throw ApiError.internal(error.message);
 
-            const { data: urlData } = supabaseAdmin.storage
-                .from('driver-documents')
-                .getPublicUrl(fileName);
-
-            return urlData.publicUrl;
+            // 🆕 Return PATH saja (mis. "500e3c50-.../ktp-xxx.jpg")
+            return fileName;
         };
 
-        const ktpUrl = files.ktp ? await uploadFile(files.ktp, 'ktp') : null;
-        const simUrl = files.sim ? await uploadFile(files.sim, 'sim') : null;
-        const stnkUrl = files.stnk ? await uploadFile(files.stnk, 'stnk') : null;
-        const selfieUrl = files.selfie
-            ? await uploadFile(files.selfie, 'selfie')
-            : null;
+        // Ambil data lama (untuk preserve path kalau tidak ada upload baru)
+        const { data: existing } = await supabaseAdmin
+            .from('driver_verifications')
+            .select('ktp_photo_url, sim_photo_url, stnk_photo_url, selfie_photo_url')
+            .eq('driver_id', driverId)
+            .maybeSingle();
 
-        // 3. Upsert verifikasi
+        const ktpPath = files.ktp
+            ? await uploadFile(files.ktp, 'ktp')
+            : existing?.ktp_photo_url ?? null;
+
+        const simPath = files.sim
+            ? await uploadFile(files.sim, 'sim')
+            : existing?.sim_photo_url ?? null;
+
+        const stnkPath = files.stnk
+            ? await uploadFile(files.stnk, 'stnk')
+            : existing?.stnk_photo_url ?? null;
+
+        const selfiePath = files.selfie
+            ? await uploadFile(files.selfie, 'selfie')
+            : existing?.selfie_photo_url ?? null;
+
+        // Upsert verifikasi
         const { data, error } = await supabaseAdmin
             .from('driver_verifications')
             .upsert(
                 {
                     driver_id: driverId,
-                    ktp_photo_url: ktpUrl,
-                    sim_photo_url: simUrl,
-                    stnk_photo_url: stnkUrl,
-                    selfie_photo_url: selfieUrl,
+                    ktp_photo_url: ktpPath,
+                    sim_photo_url: simPath,
+                    stnk_photo_url: stnkPath,
+                    selfie_photo_url: selfiePath,
                     ktp_number: input.ktpNumber,
                     sim_number: input.simNumber,
                     sim_type: input.simType ?? null,
@@ -556,7 +568,6 @@ export const driverService = {
                     plate_number: input.plateNumber,
                     status: 'pending',
                     submitted_at: new Date().toISOString(),
-                    // Reset rejection kalau submit ulang
                     rejection_reason: null,
                     reviewed_by: null,
                     reviewed_at: null,
@@ -568,7 +579,7 @@ export const driverService = {
 
         if (error) throw ApiError.internal(error.message);
 
-        // 4. Update driver_profiles dengan nomor KTP & SIM
+        // Update driver_profiles
         await supabaseAdmin
             .from('driver_profiles')
             .update({
@@ -593,7 +604,42 @@ export const driverService = {
             .maybeSingle();
 
         if (error) throw ApiError.internal(error.message);
-        return data;
+        if (!data) return null;
+
+        // 🆕 Helper: generate signed URL dari path
+        const signUrl = async (path: string | null): Promise<string | null> => {
+            if (!path) return null;
+
+            // Kalau sudah full URL (data lama), return as-is
+            if (path.startsWith('http')) return path;
+
+            const { data: urlData, error: signErr } = await supabaseAdmin.storage
+                .from('driver-documents')
+                .createSignedUrl(path, 3600); // valid 1 jam
+
+            if (signErr) {
+                logger.warn('[driver.getVerification] Sign URL gagal', {
+                    path,
+                    error: signErr.message,
+                });
+                return null;
+            }
+
+            return urlData?.signedUrl ?? null;
+        };
+
+        return {
+            ...data,
+            ktp_photo_url: await signUrl(data.ktp_photo_url),
+            sim_photo_url: await signUrl(data.sim_photo_url),
+            stnk_photo_url: await signUrl(data.stnk_photo_url),
+            selfie_photo_url: await signUrl(data.selfie_photo_url),
+            // 🆕 Kirim path asli juga (biar frontend tahu path tersimpan)
+            _ktp_path: data.ktp_photo_url,
+            _sim_path: data.sim_photo_url,
+            _stnk_path: data.stnk_photo_url,
+            _selfie_path: data.selfie_photo_url,
+        };
     },
 
     // ============================================================
