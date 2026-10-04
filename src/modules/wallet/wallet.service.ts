@@ -459,7 +459,7 @@ class WalletService {
                 url_callback: process.env.LINKQU_CALLBACK_URL,
                 customer_id: userId,
                 customer_name: userId,
-                customer_email: '',
+                customer_email: 'bocahangon64@gmail.com',
             };
         } else {
             if (!dto.bank_code) throw ApiError.badRequest('bank_code wajib untuk VA');
@@ -481,7 +481,7 @@ class WalletService {
                 url_callback: process.env.LINKQU_CALLBACK_URL,
                 customer_id: userId,
                 customer_name: userId,
-                customer_email: '',
+                customer_email: 'bocahangon64@gmail.com',
             };
         }
 
