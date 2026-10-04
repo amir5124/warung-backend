@@ -482,6 +482,120 @@ export const driverService = {
         return data;
     },
 
+    //verifikasi driver
+    async submitVerification(
+        driverId: string,
+        input: {
+            ktpNumber: string;
+            simNumber: string;
+            simType?: string;
+            stnkNumber: string;
+            plateNumber: string;
+        },
+        files: {
+            ktp?: Express.Multer.File;
+            sim?: Express.Multer.File;
+            stnk?: Express.Multer.File;
+            selfie?: Express.Multer.File;
+        }
+    ) {
+        // 1. Cek driver profile
+        const { data: dp } = await supabaseAdmin
+            .from('driver_profiles')
+            .select('user_id')
+            .eq('user_id', driverId)
+            .maybeSingle();
+
+        if (!dp) throw ApiError.notFound('Driver profile tidak ditemukan');
+
+        // 2. Upload file ke Supabase Storage
+        const uploadFile = async (
+            file: Express.Multer.File,
+            prefix: string
+        ): Promise<string> => {
+            const ext = file.originalname.split('.').pop() ?? 'jpg';
+            const fileName = `${driverId}/${prefix}-${Date.now()}.${ext}`;
+
+            const { error } = await supabaseAdmin.storage
+                .from('driver-documents')
+                .upload(fileName, file.buffer, {
+                    contentType: file.mimetype,
+                    upsert: true,
+                });
+
+            if (error) throw ApiError.internal(error.message);
+
+            const { data: urlData } = supabaseAdmin.storage
+                .from('driver-documents')
+                .getPublicUrl(fileName);
+
+            return urlData.publicUrl;
+        };
+
+        const ktpUrl = files.ktp ? await uploadFile(files.ktp, 'ktp') : null;
+        const simUrl = files.sim ? await uploadFile(files.sim, 'sim') : null;
+        const stnkUrl = files.stnk ? await uploadFile(files.stnk, 'stnk') : null;
+        const selfieUrl = files.selfie
+            ? await uploadFile(files.selfie, 'selfie')
+            : null;
+
+        // 3. Upsert verifikasi
+        const { data, error } = await supabaseAdmin
+            .from('driver_verifications')
+            .upsert(
+                {
+                    driver_id: driverId,
+                    ktp_photo_url: ktpUrl,
+                    sim_photo_url: simUrl,
+                    stnk_photo_url: stnkUrl,
+                    selfie_photo_url: selfieUrl,
+                    ktp_number: input.ktpNumber,
+                    sim_number: input.simNumber,
+                    sim_type: input.simType ?? null,
+                    stnk_number: input.stnkNumber,
+                    plate_number: input.plateNumber,
+                    status: 'pending',
+                    submitted_at: new Date().toISOString(),
+                    // Reset rejection kalau submit ulang
+                    rejection_reason: null,
+                    reviewed_by: null,
+                    reviewed_at: null,
+                },
+                { onConflict: 'driver_id' }
+            )
+            .select()
+            .single();
+
+        if (error) throw ApiError.internal(error.message);
+
+        // 4. Update driver_profiles dengan nomor KTP & SIM
+        await supabaseAdmin
+            .from('driver_profiles')
+            .update({
+                ktp_number: input.ktpNumber,
+                sim_number: input.simNumber,
+            })
+            .eq('user_id', driverId);
+
+        logger.info('[driver.submitVerification]', {
+            driverId,
+            verificationId: data.id,
+        });
+
+        return data;
+    },
+
+    async getVerification(driverId: string) {
+        const { data, error } = await supabaseAdmin
+            .from('driver_verifications')
+            .select('*')
+            .eq('driver_id', driverId)
+            .maybeSingle();
+
+        if (error) throw ApiError.internal(error.message);
+        return data;
+    },
+
     // ============================================================
     // NEARBY DRIVERS
     // ============================================================

@@ -72,4 +72,46 @@ export const driverController = {
         );
         return ok(res, data);
     }),
+
+    submitVerification: asyncHandler(async (req: Request, res: Response) => {
+        const { ktp_number, sim_number, sim_type, stnk_number, plate_number } =
+            req.body;
+
+        if (!ktp_number || !sim_number || !stnk_number || !plate_number) {
+            throw ApiError.badRequest(
+                'Nomor KTP, SIM, STNK, dan plat nomor wajib diisi'
+            );
+        }
+
+        const files = req.files as {
+            ktp?: Express.Multer.File[];
+            sim?: Express.Multer.File[];
+            stnk?: Express.Multer.File[];
+            selfie?: Express.Multer.File[];
+        };
+
+        const data = await driverService.submitVerification(
+            req.user!.id,
+            {
+                ktpNumber: ktp_number,
+                simNumber: sim_number,
+                simType: sim_type,
+                stnkNumber: stnk_number,
+                plateNumber: plate_number,
+            },
+            {
+                ktp: files?.ktp?.[0],
+                sim: files?.sim?.[0],
+                stnk: files?.stnk?.[0],
+                selfie: files?.selfie?.[0],
+            }
+        );
+
+        return ok(res, data, 'Dokumen verifikasi dikirim');
+    }),
+
+    getVerification: asyncHandler(async (req: Request, res: Response) => {
+        const data = await driverService.getVerification(req.user!.id);
+        return ok(res, data);
+    }),
 };

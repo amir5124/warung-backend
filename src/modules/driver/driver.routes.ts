@@ -8,8 +8,22 @@ import {
     updateDriverSchema,
     updateServicesSchema,
 } from './driver.schema';
+import multer from 'multer';
 
 const router = Router();
+
+const uploadDocs = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 },  // 5MB per file
+    fileFilter: (_req, file, cb) => {
+        const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+        if (allowed.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error('Format gambar tidak didukung'));
+        }
+    },
+});
 
 // ============================================================
 // Endpoint PUBLIK
@@ -70,6 +84,26 @@ router.get(
     requireAuth,
     requireRole('driver'),
     driverController.getEarningsHistory
+);
+
+router.post(
+    '/verification',
+    requireAuth,
+    requireRole('driver'),
+    uploadDocs.fields([
+        { name: 'ktp', maxCount: 1 },
+        { name: 'sim', maxCount: 1 },
+        { name: 'stnk', maxCount: 1 },
+        { name: 'selfie', maxCount: 1 },
+    ]),
+    driverController.submitVerification
+);
+
+router.get(
+    '/verification',
+    requireAuth,
+    requireRole('driver'),
+    driverController.getVerification
 );
 
 export default router;
