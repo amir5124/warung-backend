@@ -486,34 +486,64 @@ class WalletService {
         }
 
         try {
-            const response = await axios.post(
+            // ============================================================
+            // FETCH (ganti axios)
+            // ============================================================
+            const response = await fetch(
                 `${LINKQU_CONFIG.baseUrl}${endpoint}`,
-                payload,
                 {
+                    method: 'POST',
                     headers: {
                         'client-id': LINKQU_CONFIG.clientId,
                         'client-secret': LINKQU_CONFIG.clientSecret,
                         'Content-Type': 'text/plain',
+                        // User-Agent browser biar lolos Cloudflare WAF
+                        'User-Agent':
+                            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        Accept: 'application/json, text/plain, */*',
+                        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
                     },
+                    body: JSON.stringify(payload),
                 }
             );
 
+            // Cek status HTTP
+            if (!response.ok) {
+                const text = await response.text();
+                logger.error('Topup HTTP error', {
+                    status: response.status,
+                    body: text.slice(0, 500),
+                });
+                throw ApiError.internal(
+                    `LinkQu error ${response.status}: ${text.slice(0, 200)}`
+                );
+            }
+
+            // Parse JSON
+            const data: any = await response.json();
+
+            // Simpan ke DB
             await supabaseAdmin.from('wallet_topups').insert({
                 user_id: userId,
                 partner_reff: partnerReff,
                 method: dto.method,
                 amount: dto.amount,
                 bank_code: dto.bank_code ?? null,
-                va_number: response.data?.virtual_account ?? null,
-                qris_url: response.data?.imageqris ?? null,
+                va_number: data?.virtual_account ?? null,
+                qris_url: data?.imageqris ?? null,
                 status: 'PENDING',
-                raw_response: response.data,
+                raw_response: data,
                 expired_at: this.parseExpiredToDate(expired),
             });
 
-            return { ...response.data, partner_reff: partnerReff };
+            return { ...data, partner_reff: partnerReff };
         } catch (err: any) {
-            logger.error('Topup inquiry error', { error: err.response?.data || err.message });
+            // Kalau error dari ApiError, lempar ulang
+            if (err instanceof ApiError) throw err;
+
+            logger.error('Topup inquiry error', {
+                error: err?.message ?? err,
+            });
             throw ApiError.internal('Gagal membuat topup');
         }
     }
