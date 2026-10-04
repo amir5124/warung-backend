@@ -69,27 +69,33 @@ export const ratingService = {
         return rating;
     },
 
-    // ============================================================
-    // RECALCULATE STATS (rating_avg + total_reviews + total_trips/total_orders)
-    // ============================================================
+    // ✅ SESUDAH — avg = NULL kalau 0 review
     async recalculateStats(userId: string) {
-        // Ambil semua rating untuk user ini
         const { data: agg, error: aggErr } = await supabaseAdmin
             .from('ratings')
             .select('rating')
             .eq('reviewee_id', userId);
 
         if (aggErr) {
-            logger.warn('Gagal hitung rating avg', { error: aggErr, userId });
+            logger.warn('Gagal hitung rating avg', {
+                error: aggErr,
+                userId,
+            });
             return;
         }
 
         const reviewCount = agg?.length ?? 0;
-        const avg =
+
+        // 🆕 Kalau belum ada review → NULL (bukan 0 / 5.0)
+        const avg: number | null =
             reviewCount > 0
-                ? agg!.reduce((s, r: any) => s + (r.rating ?? 0), 0) /
-                reviewCount
-                : 0;
+                ? Number(
+                    (
+                        agg!.reduce((s, r: any) => s + (r.rating ?? 0), 0) /
+                        reviewCount
+                    ).toFixed(2)
+                )
+                : null;
 
         // Cek role user
         const { data: profile } = await supabaseAdmin
@@ -98,13 +104,9 @@ export const ratingService = {
             .eq('id', userId)
             .maybeSingle();
 
-        if (!profile) {
-            logger.warn('Profile tidak ditemukan saat recalc', { userId });
-            return;
-        }
+        if (!profile) return;
 
         if (profile.role === 'driver') {
-            // Update driver_profiles: rating_avg + total_trips
             const { count: tripsCount } = await supabaseAdmin
                 .from('orders')
                 .select('id', { count: 'exact', head: true })
@@ -114,28 +116,19 @@ export const ratingService = {
             await supabaseAdmin
                 .from('driver_profiles')
                 .update({
-                    rating_avg: Number(avg.toFixed(2)),
+                    rating_avg: avg,        // ⬅️ bisa NULL
                     total_trips: tripsCount ?? 0,
                 })
                 .eq('user_id', userId);
 
-            // Sync ke profiles juga
             await supabaseAdmin
                 .from('profiles')
                 .update({
-                    rating_avg: Number(avg.toFixed(2)),
+                    rating_avg: avg,        // ⬅️ bisa NULL
                     total_reviews: reviewCount,
                 })
                 .eq('id', userId);
-
-            logger.info('Driver stats updated', {
-                driverId: userId,
-                rating_avg: avg,
-                total_reviews: reviewCount,
-                total_trips: tripsCount,
-            });
         } else {
-            // Update profiles customer: rating_avg + total_reviews + total_orders
             const { count: ordersCount } = await supabaseAdmin
                 .from('orders')
                 .select('id', { count: 'exact', head: true })
@@ -145,21 +138,20 @@ export const ratingService = {
             await supabaseAdmin
                 .from('profiles')
                 .update({
-                    rating_avg: Number(avg.toFixed(2)),
+                    rating_avg: avg,        // ⬅️ bisa NULL
                     total_reviews: reviewCount,
                     total_orders: ordersCount ?? 0,
                 })
                 .eq('id', userId);
-
-            logger.info('Customer stats updated', {
-                customerId: userId,
-                rating_avg: avg,
-                total_reviews: reviewCount,
-                total_orders: ordersCount,
-            });
         }
-    },
 
+        logger.info('Rating stats recalculated', {
+            userId,
+            role: profile.role,
+            rating_avg: avg,
+            review_count: reviewCount,
+        });
+    },
     // ============================================================
     // GET BY ORDER
     // ============================================================
