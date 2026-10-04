@@ -14,7 +14,7 @@ const LINKQU_CONFIG = {
     username: process.env.LINKQU_USERNAME!,
     pin: process.env.LINKQU_PIN!,
     serverKey: process.env.LINKQU_SERVER_KEY!,
-    baseUrl: 'https://api.linkqu.id/linkqu-partner',
+    baseUrl: 'https://gateway-dev.linkqu.id/linkqu-partner',
 };
 
 const BANK_MAPPING: Record<string, string> = {
