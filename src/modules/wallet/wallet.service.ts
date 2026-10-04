@@ -84,7 +84,7 @@ export type CustomerWallet = {
 };
 
 // ============================================================
-// SERVICE (class → overload valid)
+// SERVICE
 // ============================================================
 class WalletService {
     // ============================================================
@@ -319,7 +319,7 @@ class WalletService {
     }
 
     // ============================================================
-    // REQUEST PAYOUT (driver only) — ✅ anti garis merah
+    // REQUEST PAYOUT (driver only)
     // ============================================================
     async requestPayout(
         driverId: string,
@@ -328,7 +328,6 @@ class WalletService {
     ) {
         if (amount <= 0) throw ApiError.badRequest('Jumlah harus > 0');
 
-        // ✅ overload: role 'driver' → DriverWallet (cash_debt PASTI number)
         const wallet = await this.getWallet(driverId, 'driver');
 
         if (wallet.balance < amount) {
@@ -426,10 +425,7 @@ class WalletService {
     }
 
     // ============================================================
-    // TOPUP — INQUIRY (VA / QRIS)
-    // ============================================================
-    // ============================================================
-    // TOPUP — INQUIRY (VA / QRIS)
+    // TOPUP — INQUIRY (VA / QRIS) — dengan log signature lengkap
     // ============================================================
     async topupInquiry(userId: string, dto: {
         amount: number;
@@ -440,6 +436,16 @@ class WalletService {
 
         if (dto.amount < 10000) throw ApiError.badRequest('Minimal topup Rp10.000');
 
+        // ✅ Ambil profile user untuk customer_name & email yang konsisten
+        const { data: profile } = await supabaseAdmin
+            .from('profiles')
+            .select('full_name, email')
+            .eq('id', userId)
+            .single();
+
+        const customerName = profile?.full_name ?? 'Customer';
+        const customerEmail = profile?.email ?? 'noreply@warung.id';
+
         const partnerReff = `TOPUP-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
         const expired = this.generateExpiredTimestamp();
 
@@ -449,8 +455,12 @@ class WalletService {
         if (dto.method === 'qris') {
             endpoint = '/transaction/create/qris';
             const signature = this.signQris({
-                amount: dto.amount, expired, partner_reff: partnerReff,
-                customer_id: userId, customer_name: userId, customer_email: '',
+                amount: dto.amount,
+                expired,
+                partner_reff: partnerReff,
+                customer_id: userId,
+                customer_name: customerName,
+                customer_email: customerEmail,
             });
             payload = {
                 username: LINKQU_CONFIG.username,
@@ -461,17 +471,21 @@ class WalletService {
                 signature,
                 url_callback: process.env.LINKQU_CALLBACK_URL,
                 customer_id: userId,
-                customer_name: userId,
-                customer_email: 'bocahangon64@gmail.com',
+                customer_name: customerName,
+                customer_email: customerEmail,
             };
         } else {
             if (!dto.bank_code) throw ApiError.badRequest('bank_code wajib untuk VA');
             endpoint = '/transaction/create/va';
             const realBankCode = BANK_MAPPING[dto.bank_code.toUpperCase()] || dto.bank_code;
             const signature = this.signVa({
-                amount: dto.amount, expired, bank_code: realBankCode,
+                amount: dto.amount,
+                expired,
+                bank_code: realBankCode,
                 partner_reff: partnerReff,
-                customer_id: userId, customer_name: userId, customer_email: '',
+                customer_id: userId,
+                customer_name: customerName,
+                customer_email: customerEmail,
             });
             payload = {
                 username: LINKQU_CONFIG.username,
@@ -483,8 +497,8 @@ class WalletService {
                 signature,
                 url_callback: process.env.LINKQU_CALLBACK_URL,
                 customer_id: userId,
-                customer_name: userId,
-                customer_email: 'bocahangon64@gmail.com',
+                customer_name: customerName,
+                customer_email: customerEmail,
             };
         }
 
@@ -508,7 +522,6 @@ class WalletService {
 
             console.log('📥 [LINKQU HTTP]', response.status, response.statusText);
 
-            // Baca body SEKALI saja
             const rawText = await response.text();
             console.log('📥 [LINKQU RAW]', rawText);
 
@@ -523,7 +536,6 @@ class WalletService {
                 );
             }
 
-            // Parse JSON
             let data: any;
             try {
                 data = JSON.parse(rawText);
@@ -585,7 +597,6 @@ class WalletService {
             return { status: 'SUCCESS', message: 'Sudah dibayar' };
         }
 
-        // Bangun URL dengan query string
         const url = new URL(
             `${LINKQU_CONFIG.baseUrl}/transaction/payment/checkstatus`
         );
@@ -633,7 +644,6 @@ class WalletService {
 
             console.log('✅ [LINKQU PARSED]', JSON.stringify(data, null, 2));
 
-            // Update status di DB kalau LinkQu bilang SUCCESS
             const statusFromLinkqu = data?.status;
             if (
                 statusFromLinkqu === 'SUCCESS' ||
@@ -661,6 +671,7 @@ class WalletService {
             throw ApiError.internal('Gagal cek status topup');
         }
     }
+
     // ============================================================
     // TOPUP — GET STATUS dari DB
     // ============================================================
@@ -688,7 +699,6 @@ class WalletService {
         const wallet = role === 'driver'
             ? await this.getWallet(userId, 'driver')
             : await this.getWallet(userId, 'customer');
-
 
         if (wallet.balance < dto.amount) {
             throw ApiError.badRequest(
@@ -947,7 +957,7 @@ class WalletService {
     }
 
     // ============================================================
-    // HELPER — SIGNATURE LINKQU
+    // HELPER — SIGNATURE LINKQU (dengan log lengkap)
     // ============================================================
     signVa(d: {
         amount: number; expired: string; bank_code: string; partner_reff: string;
@@ -957,8 +967,25 @@ class WalletService {
         const method = 'POST';
         const raw = `${d.amount}${d.expired}${d.bank_code}${d.partner_reff}${d.customer_id}${d.customer_name}${d.customer_email}${LINKQU_CONFIG.clientId}`;
         const cleaned = raw.replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
+        const signString = path + method + cleaned;
+
+        console.log('🔐 [signVa] ================================');
+        console.log('🔐 [signVa] amount:', d.amount);
+        console.log('🔐 [signVa] expired:', d.expired);
+        console.log('🔐 [signVa] bank_code:', d.bank_code);
+        console.log('🔐 [signVa] partner_reff:', d.partner_reff);
+        console.log('🔐 [signVa] customer_id:', d.customer_id);
+        console.log('🔐 [signVa] customer_name:', d.customer_name);
+        console.log('🔐 [signVa] customer_email:', d.customer_email);
+        console.log('🔐 [signVa] clientId:', LINKQU_CONFIG.clientId);
+        console.log('🔐 [signVa] RAW:', raw);
+        console.log('🔐 [signVa] CLEANED:', cleaned);
+        console.log('🔐 [signVa] SIGN STRING:', signString);
+        console.log('🔐 [signVa] SERVER KEY:', LINKQU_CONFIG.serverKey);
+        console.log('🔐 [signVa] ================================');
+
         return crypto.createHmac('sha256', LINKQU_CONFIG.serverKey)
-            .update(path + method + cleaned).digest('hex');
+            .update(signString).digest('hex');
     }
 
     signQris(d: {
@@ -969,8 +996,24 @@ class WalletService {
         const method = 'POST';
         const raw = `${d.amount}${d.expired}${d.partner_reff}${d.customer_id}${d.customer_name}${d.customer_email}${LINKQU_CONFIG.clientId}`;
         const cleaned = raw.replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
+        const signString = path + method + cleaned;
+
+        console.log('🔐 [signQris] ================================');
+        console.log('🔐 [signQris] amount:', d.amount);
+        console.log('🔐 [signQris] expired:', d.expired);
+        console.log('🔐 [signQris] partner_reff:', d.partner_reff);
+        console.log('🔐 [signQris] customer_id:', d.customer_id);
+        console.log('🔐 [signQris] customer_name:', d.customer_name);
+        console.log('🔐 [signQris] customer_email:', d.customer_email);
+        console.log('🔐 [signQris] clientId:', LINKQU_CONFIG.clientId);
+        console.log('🔐 [signQris] RAW:', raw);
+        console.log('🔐 [signQris] CLEANED:', cleaned);
+        console.log('🔐 [signQris] SIGN STRING:', signString);
+        console.log('🔐 [signQris] SERVER KEY:', LINKQU_CONFIG.serverKey);
+        console.log('🔐 [signQris] ================================');
+
         return crypto.createHmac('sha256', LINKQU_CONFIG.serverKey)
-            .update(path + method + cleaned).digest('hex');
+            .update(signString).digest('hex');
     }
 
     generateExpiredTimestamp(minutes = 15) {
