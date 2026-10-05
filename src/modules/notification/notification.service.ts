@@ -1,13 +1,54 @@
+// src/modules/notification/notification.service.ts
 import { supabaseAdmin } from '../../config/supabase';
 import { expoPushService } from './expoPush.service';
 import { getIO } from '../../sockets';
 import { logger } from '../../config/logger';
 
-// HARUS sama dengan ANDROID_CHANNEL_ID di frontend (lib/push.ts)
-const ANDROID_CHANNEL_ID = 'orders';
-// HARUS sama dengan nama file di android/app/src/main/res/raw/notification.mp3
-// TANPA ekstensi .mp3
-const ANDROID_SOUND = 'notification';
+// ============================================================
+// KONFIGURASI CHANNEL & SOUND PER ROLE
+// ============================================================
+// ⚠️ Channel ID & sound HARUS SAMA dengan:
+// - _layout.tsx di masing-masing app (customer / driver / merchant)
+// - app.json `defaultChannel` di masing-masing app
+// - File suara di android/app/src/main/res/raw/<sound>.mp3
+//   (TANPA ekstensi .mp3)
+//
+// Nama file suara di app:
+// - customer: assets/sounds/customer.mp3
+// - driver:   assets/sounds/driver-order.mp3
+// - merchant: assets/sounds/merchant-order.mp3
+// ============================================================
+
+type UserRole = 'customer' | 'driver' | 'merchant';
+
+const CHANNEL_MAP: Record<UserRole, string> = {
+    customer: 'customer-notif-v1',
+    driver: 'driver-orders-v1',
+    merchant: 'merchant-orders-v1',
+};
+
+const SOUND_MAP: Record<UserRole, string> = {
+    customer: 'customer',           // tanpa .mp3
+    driver: 'driver-order',         // tanpa .mp3
+    merchant: 'merchant-order',     // tanpa .mp3
+};
+
+// Fallback kalau role tidak dikenal
+const DEFAULT_ROLE: UserRole = 'customer';
+
+function resolveChannel(role: string | null | undefined): {
+    role: UserRole;
+    channelId: string;
+    sound: string;
+} {
+    const r = (role ?? DEFAULT_ROLE) as UserRole;
+    const safeRole: UserRole = CHANNEL_MAP[r] ? r : DEFAULT_ROLE;
+    return {
+        role: safeRole,
+        channelId: CHANNEL_MAP[safeRole],
+        sound: SOUND_MAP[safeRole],
+    };
+}
 
 export interface NotificationPayload {
     title: string;
@@ -16,12 +57,9 @@ export interface NotificationPayload {
 }
 
 export const notificationService = {
-    /**
-     * Kirim notifikasi ke user:
-     * 1. Simpan ke tabel `notifications`
-     * 2. Emit via Socket.IO (kalau user online)
-     * 3. Kirim via Expo Push (kalau user punya fcm_token)
-     */
+    // ============================================================
+    // KIRIM KE 1 USER
+    // ============================================================
     async sendToUser(userId: string, payload: NotificationPayload) {
         // ---------- 1. Simpan ke DB ----------
         try {
@@ -52,10 +90,10 @@ export const notificationService = {
             logger.info('Socket emit notif', { userId });
         }
 
-        // ---------- 3. Expo Push ----------
+        // ---------- 3. Ambil profile (fcm_token + role) ----------
         const { data: profile } = await supabaseAdmin
             .from('profiles')
-            .select('fcm_token')
+            .select('fcm_token, role')
             .eq('id', userId)
             .maybeSingle();
 
@@ -64,36 +102,47 @@ export const notificationService = {
             return true;
         }
 
+        // ---------- 4. Tentukan channel & sound berdasarkan role ----------
+        const { role, channelId, sound } = resolveChannel(profile.role);
+
+        logger.info('Push target', {
+            userId,
+            role,
+            channelId,
+            sound,
+        });
+
+        // ---------- 5. Kirim Expo Push ----------
         const result = await expoPushService.send({
             to: profile.fcm_token,
             title: payload.title,
             body: payload.body,
             data: payload.data,
-            sound: ANDROID_SOUND,        // ← 'notification' (tanpa .mp3)
+            sound,          // ← sesuai role
             priority: 'high',
-            channelId: ANDROID_CHANNEL_ID,  // ← 'orders'
+            channelId,      // ← sesuai role
         });
 
         if (result) {
             logger.info('Push terkirim', {
                 userId,
+                role,
                 title: payload.title,
-                channelId: ANDROID_CHANNEL_ID,
-                sound: ANDROID_SOUND,
+                channelId,
+                sound,
             });
         }
 
         return true;
     },
 
-    /**
-     * Kirim ke banyak user sekaligus.
-     * Cocok untuk broadcast ke driver kandidat.
-     */
+    // ============================================================
+    // KIRIM KE BANYAK USER (group by role)
+    // ============================================================
     async sendToUsers(userIds: string[], payload: NotificationPayload) {
         if (!userIds.length) return;
 
-        // Simpan ke DB batch
+        // ---------- 1. Simpan ke DB batch ----------
         try {
             await supabaseAdmin.from('notifications').insert(
                 userIds.map((uid) => ({
@@ -111,7 +160,7 @@ export const notificationService = {
             });
         }
 
-        // Socket.IO batch
+        // ---------- 2. Socket.IO batch ----------
         const io = getIO();
         if (io) {
             userIds.forEach((uid) => {
@@ -123,10 +172,10 @@ export const notificationService = {
             });
         }
 
-        // Expo push batch (1 request untuk banyak user)
+        // ---------- 3. Ambil profiles dengan fcm_token ----------
         const { data: profiles } = await supabaseAdmin
             .from('profiles')
-            .select('id, fcm_token')
+            .select('id, fcm_token, role')
             .in('id', userIds)
             .not('fcm_token', 'is', null);
 
@@ -135,24 +184,51 @@ export const notificationService = {
             return;
         }
 
-        const messages = profiles.map((p) => ({
-            to: p.fcm_token!,
-            title: payload.title,
-            body: payload.body,
-            data: payload.data,
-            sound: ANDROID_SOUND,
-            priority: 'high' as const,
-            channelId: ANDROID_CHANNEL_ID,
-        }));
+        // ---------- 4. Group by role ----------
+        // Karena channel & sound beda per role, kita kirim per group
+        const groups: Record<UserRole, typeof profiles> = {
+            customer: [],
+            driver: [],
+            merchant: [],
+        };
 
-        await expoPushService.send(messages);
-        logger.info('Batch push terkirim', {
-            count: messages.length,
-            channelId: ANDROID_CHANNEL_ID,
-            sound: ANDROID_SOUND,
+        profiles.forEach((p) => {
+            const { role } = resolveChannel(p.role);
+            groups[role].push(p);
         });
+
+        // ---------- 5. Kirim per group ----------
+        for (const role of Object.keys(groups) as UserRole[]) {
+            const list = groups[role];
+            if (!list.length) continue;
+
+            const channelId = CHANNEL_MAP[role];
+            const sound = SOUND_MAP[role];
+
+            const messages = list.map((p) => ({
+                to: p.fcm_token!,
+                title: payload.title,
+                body: payload.body,
+                data: payload.data,
+                sound,          // ← sesuai role
+                priority: 'high' as const,
+                channelId,      // ← sesuai role
+            }));
+
+            await expoPushService.send(messages);
+
+            logger.info('Batch push terkirim', {
+                role,
+                count: messages.length,
+                channelId,
+                sound,
+            });
+        }
     },
 
+    // ============================================================
+    // LIST NOTIFIKASI
+    // ============================================================
     async list(userId: string) {
         const { data } = await supabaseAdmin
             .from('notifications')
@@ -163,6 +239,9 @@ export const notificationService = {
         return data || [];
     },
 
+    // ============================================================
+    // MARK AS READ
+    // ============================================================
     async markRead(userId: string, notifId: number) {
         await supabaseAdmin
             .from('notifications')
