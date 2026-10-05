@@ -11,30 +11,44 @@ export const merchantService = {
         store_name: string;
         description?: string;
         address?: string;
+        latitude?: number;
+        longitude?: number;
         logo_url?: string;
         cover_url?: string;
         is_open?: boolean;
         open_hours?: any;
     }) {
-        if (!data.store_name) {
-            throw ApiError.badRequest('Nama toko wajib diisi');
+        if (!data.store_name) throw ApiError.badRequest('Nama toko wajib diisi');
+
+        const payload: any = {
+            user_id: userId,
+            store_name: data.store_name,
+            description: data.description ?? null,
+            address: data.address ?? null,
+            logo_url: data.logo_url ?? null,
+            cover_url: data.cover_url ?? null,
+            is_open: data.is_open ?? false,
+            open_hours: data.open_hours ?? null,
+        };
+
+        // Kalau lat/lng dikirim, set location + lat + lng
+        if (typeof data.latitude === 'number' && typeof data.longitude === 'number') {
+            if (
+                data.latitude < -90 || data.latitude > 90 ||
+                data.longitude < -180 || data.longitude > 180
+            ) {
+                throw ApiError.badRequest('Koordinat tidak valid');
+            }
+
+            payload.latitude = data.latitude;
+            payload.longitude = data.longitude;
+            // PostGIS: POINT(lng lat)
+            payload.location = `SRID=4326;POINT(${data.longitude} ${data.latitude})`;
         }
 
         const { data: store, error } = await supabaseAdmin
             .from('merchant_profiles')
-            .upsert(
-                {
-                    user_id: userId,
-                    store_name: data.store_name,
-                    description: data.description ?? null,
-                    address: data.address ?? null,
-                    logo_url: data.logo_url ?? null,
-                    cover_url: data.cover_url ?? null,
-                    is_open: data.is_open ?? false,
-                    open_hours: data.open_hours ?? null,
-                },
-                { onConflict: 'user_id' }
-            )
+            .upsert(payload, { onConflict: 'user_id' })
             .select()
             .single();
 
@@ -42,10 +56,8 @@ export const merchantService = {
             logger.error('upsertStore error', { error, userId });
             throw ApiError.internal('Gagal menyimpan profil toko');
         }
-
         return store;
     },
-
     // ============================================================
     // GET STORE — ambil profil toko milik merchant
     // ============================================================
