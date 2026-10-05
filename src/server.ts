@@ -23,8 +23,8 @@ import tariffRoutes from './modules/tariff/tariff.routes';
 import ratingRoutes from './modules/rating/rating.routes';
 import activityRoutes from './modules/activity/activity.routes';
 import walletRoutes from './modules/wallet/wallet.routes';
+import walletCallbackRouter from './modules/wallet/wallet.callback';  // ← TAMBAH INI
 import merchantRouter from './modules/merchant/merchant.routes';
-
 
 import { orderTimeoutService } from './modules/order/order-timeout.service';
 
@@ -53,7 +53,18 @@ app.use('/api/saved-addresses', savedAddressRoutes);
 app.use('/api/tariffs', tariffRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/activity', activityRoutes);
+
+// ============================================================
+// CALLBACK LINKQU — tanpa auth (didaftarkan DULUAN)
+// URL: https://warung.siappgo.id/api/wallet/callback
+// ============================================================
+app.use('/api/wallet', walletCallbackRouter);
+
+// ============================================================
+// WALLET ROUTES — butuh auth (didaftarkan SETELAH callback)
+// ============================================================
 app.use('/api/wallet', walletRoutes);
+
 app.use('/api/merchant', merchantRouter);
 
 app.use(notFound);
@@ -64,8 +75,8 @@ initSocket(httpServer);
 
 startJobs();
 
-// ⬇️ TAMBAH 1 baris ini — sebelum atau sesudah listen, dua-duanya OK
-orderTimeoutService.start(60_000); // cek order pending tiap 1 menit
+// Cek order pending tiap 1 menit
+orderTimeoutService.start(60_000);
 
 httpServer.listen(env.port, () => {
     logger.info(`Server running on port ${env.port}`);
