@@ -8,23 +8,23 @@ import { logger } from '../../config/logger';
 // ============================================================
 // KONFIGURASI LINKQU
 // ============================================================
-const LINKQU_CONFIG = {
-    clientId: process.env.LINKQU_CLIENT_ID ?? '5f5aa496-7e16-4ca1-9967-33c768dac6c7',
-    clientSecret: process.env.LINKQU_CLIENT_SECRET ?? 'TM1rVhfaFm5YJxKruHo0nWMWC',
-    username: process.env.LINKQU_USERNAME ?? 'LI9019VKS',
-    pin: process.env.LINKQU_PIN ?? '5m6uYAScSxQtCmU',
-    serverKey: process.env.LINKQU_SERVER_KEY ?? 'QtwGEr997XDcmMb1Pq8S5X1N',
-    baseUrl: process.env.LINKQU_BASE_URL ?? 'https://api.linkqu.id/linkqu-partner',
-};
-
 // const LINKQU_CONFIG = {
-//     clientId: process.env.LINKQU_CLIENT_ID ?? 'testing',
-//     clientSecret: process.env.LINKQU_CLIENT_SECRET ?? '123',
-//     username: process.env.LINKQU_USERNAME ?? 'LI307GXIN',
-//     pin: process.env.LINKQU_PIN ?? '2K2NPCBBNNTovgB',
-//     serverKey: process.env.LINKQU_SERVER_KEY ?? 'LinkQu@2020',
-//     baseUrl: process.env.LINKQU_BASE_URL ?? 'https://gateway-dev.linkqu.id/linkqu-partner',
+//     clientId: process.env.LINKQU_CLIENT_ID ?? '5f5aa496-7e16-4ca1-9967-33c768dac6c7',
+//     clientSecret: process.env.LINKQU_CLIENT_SECRET ?? 'TM1rVhfaFm5YJxKruHo0nWMWC',
+//     username: process.env.LINKQU_USERNAME ?? 'LI9019VKS',
+//     pin: process.env.LINKQU_PIN ?? '5m6uYAScSxQtCmU',
+//     serverKey: process.env.LINKQU_SERVER_KEY ?? 'QtwGEr997XDcmMb1Pq8S5X1N',
+//     baseUrl: process.env.LINKQU_BASE_URL ?? 'https://api.linkqu.id/linkqu-partner',
 // };
+
+const LINKQU_CONFIG = {
+    clientId: process.env.LINKQU_CLIENT_ID ?? 'testing',
+    clientSecret: process.env.LINKQU_CLIENT_SECRET ?? '123',
+    username: process.env.LINKQU_USERNAME ?? 'LI307GXIN',
+    pin: process.env.LINKQU_PIN ?? '2K2NPCBBNNTovgB',
+    serverKey: process.env.LINKQU_SERVER_KEY ?? 'LinkQu@2020',
+    baseUrl: process.env.LINKQU_BASE_URL ?? 'https://gateway-dev.linkqu.id/linkqu-partner',
+};
 
 const BANK_MAPPING: Record<string, string> = {
     'VA BRI': '002', BRI: '002',
@@ -478,7 +478,7 @@ class WalletService {
                 partner_reff: partnerReff,
                 expired,
                 signature,
-                url_callback: process.env.LINKQU_CALLBACK_URL,
+                url_callback: 'https://warung.siappgo.id/api/wallet/callback',
                 customer_id: userId,
                 customer_name: customerName,
                 customer_email: customerEmail,
@@ -504,7 +504,7 @@ class WalletService {
                 partner_reff: partnerReff,
                 expired,
                 signature,
-                url_callback: process.env.LINKQU_CALLBACK_URL,
+                url_callback: 'https://warung.siappgo.id/api/wallet/callback',
                 customer_id: userId,
                 customer_name: customerName,
                 customer_email: customerEmail,
@@ -842,7 +842,7 @@ class WalletService {
             inquiry_reff: inquiryReff,
             signature,
             remark: 'Withdraw Mitra',
-            url_callback: process.env.LINKQU_CALLBACK_URL,
+            url_callback: 'https://warung.siappgo.id/api/wallet/callback',
         };
 
         try {
