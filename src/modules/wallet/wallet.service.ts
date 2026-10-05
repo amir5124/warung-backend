@@ -17,14 +17,25 @@ const LINKQU_CONFIG = {
     baseUrl: process.env.LINKQU_BASE_URL ?? 'https://api.linkqu.id/linkqu-partner',
 };
 
-// const LINKQU_CONFIG = {
-//     clientId: process.env.LINKQU_CLIENT_ID ?? 'testing',
-//     clientSecret: process.env.LINKQU_CLIENT_SECRET ?? '123',
-//     username: process.env.LINKQU_USERNAME ?? 'LI307GXIN',
-//     pin: process.env.LINKQU_PIN ?? '2K2NPCBBNNTovgB',
-//     serverKey: process.env.LINKQU_SERVER_KEY ?? 'LinkQu@2020',
-//     baseUrl: process.env.LINKQU_BASE_URL ?? 'https://gateway-dev.linkqu.id/linkqu-partner',
-// };
+// ============================================================
+// KONSTANTA FEE ADMIN
+// ============================================================
+const FEE_ADMIN_VA = 2500;              // VA default
+const FEE_ADMIN_BCA = 4000;             // VA BCA khusus
+const FEE_ADMIN_QRIS_PERCENT = 0.008;   // QRIS 0.8%
+
+export function calculateAdminFee(
+    method: string,
+    bankCode: string | null,
+    amount: number
+): number {
+    const m = (method ?? '').toLowerCase();
+    if (m === 'qris') {
+        return Math.round(amount * FEE_ADMIN_QRIS_PERCENT);
+    }
+    if (bankCode === '014') return FEE_ADMIN_BCA; // BCA
+    return FEE_ADMIN_VA;
+}
 
 const BANK_MAPPING: Record<string, string> = {
     'VA BRI': '002', BRI: '002',
@@ -97,7 +108,7 @@ export type CustomerWallet = {
 // ============================================================
 class WalletService {
     // ============================================================
-    // GET WALLET — overload
+    // GET WALLET
     // ============================================================
     async getWallet(userId: string, role: 'driver'): Promise<DriverWallet>;
     async getWallet(userId: string, role: 'customer'): Promise<CustomerWallet>;
@@ -434,7 +445,7 @@ class WalletService {
     }
 
     // ============================================================
-    // TOPUP — INQUIRY (VA / QRIS) — dengan log signature lengkap
+    // TOPUP — INQUIRY (VA / QRIS)
     // ============================================================
     async topupInquiry(userId: string, dto: {
         amount: number;
@@ -445,7 +456,6 @@ class WalletService {
 
         if (dto.amount < 10000) throw ApiError.badRequest('Minimal topup Rp10.000');
 
-        // ✅ Ambil profile user untuk customer_name & email yang konsisten
         const { data: profile } = await supabaseAdmin
             .from('profiles')
             .select('full_name, email')
@@ -575,6 +585,25 @@ class WalletService {
                 console.error('❌ [DB] Insert wallet_topups gagal:', dbErr);
                 logger.error('Insert wallet_topups gagal', { error: dbErr });
             }
+
+            // ============================================================
+            // ✅ KIRIM NOTIFIKASI "Kode Pembayaran Dibuat"
+            // ============================================================
+            await this.sendNotification(userId, 'topup_created', {
+                title: 'Kode Pembayaran Dibuat',
+                body:
+                    dto.method === 'qris'
+                        ? `Scan QRIS untuk topup Rp${dto.amount.toLocaleString('id-ID')}. Berlaku sampai ${this.formatExpiredDisplay(expired)}.`
+                        : `Transfer ke VA ${data?.virtual_account ?? '-'} sebesar Rp${dto.amount.toLocaleString('id-ID')}. Berlaku sampai ${this.formatExpiredDisplay(expired)}.`,
+                data: {
+                    type: 'topup_created',
+                    method: dto.method,
+                    amount: dto.amount,
+                    va_number: data?.virtual_account ?? null,
+                    qris_url: data?.imageqris ?? null,
+                    partner_reff: partnerReff,
+                },
+            });
 
             return { ...data, partner_reff: partnerReff };
         } catch (err: any) {
@@ -966,7 +995,55 @@ class WalletService {
     }
 
     // ============================================================
-    // HELPER — SIGNATURE LINKQU (dengan log lengkap)
+    // HELPER — NOTIFIKASI
+    // ============================================================
+    private async sendNotification(
+        userId: string,
+        type: string,
+        payload: { title: string; body: string; data?: any }
+    ) {
+        try {
+            // Insert ke tabel notifications
+            await supabaseAdmin.from('notifications').insert({
+                user_id: userId,
+                title: payload.title,
+                body: payload.body,
+                data: payload.data ?? null,
+                channel: 'both',
+                is_read: false,
+            });
+
+            // Log ke notification_log
+            await supabaseAdmin.from('notification_log').insert({
+                user_id: userId,
+                type,
+                title: payload.title,
+                body: payload.body,
+                ai: false,
+            });
+
+            logger.info('🔔 Notifikasi terkirim', { userId, type });
+        } catch (err: any) {
+            // Jangan throw — notifikasi gagal bukan error fatal
+            logger.error('❌ Gagal kirim notifikasi', {
+                error: err?.message,
+                userId,
+                type,
+            });
+        }
+    }
+
+    private formatExpiredDisplay(expired: string): string {
+        const dd = expired.slice(6, 8);
+        const mm = expired.slice(4, 6);
+        const yyyy = expired.slice(0, 4);
+        const hh = expired.slice(8, 10);
+        const mi = expired.slice(10, 12);
+        return `${dd}/${mm}/${yyyy} ${hh}:${mi} WIB`;
+    }
+
+    // ============================================================
+    // HELPER — SIGNATURE LINKQU
     // ============================================================
     signVa(d: {
         amount: number; expired: string; bank_code: string; partner_reff: string;
@@ -1026,10 +1103,7 @@ class WalletService {
     }
 
     generateExpiredTimestamp(minutes = 15) {
-        // Waktu sekarang dalam WIB (UTC+7)
         const nowWIB = new Date(Date.now() + 7 * 60 * 60 * 1000);
-
-        // Tambah durasi expired
         nowWIB.setMinutes(nowWIB.getMinutes() + minutes);
 
         const pad = (n: number) => n.toString().padStart(2, '0');
