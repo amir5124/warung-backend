@@ -2,29 +2,26 @@
 import { Router, Request, Response } from 'express';
 import { supabaseAdmin } from '../../config/supabase';
 import { logger } from '../../config/logger';
+import { notificationService } from '../notification/notification.service';
 
 const router = Router();
 
 // ============================================================
 // KONSTANTA FEE ADMIN
 // ============================================================
-const FEE_ADMIN_VA = 2500;        // VA default
-const FEE_ADMIN_BCA = 4000;       // BCA khusus
-const FEE_ADMIN_QRIS_PERCENT = 0.008; // 0.8%
+const FEE_ADMIN_VA = 2500;
+const FEE_ADMIN_BCA = 4000;
+const FEE_ADMIN_QRIS_PERCENT = 0.008;
 
 function calculateAdminFee(method: string, bankCode: string | null, amount: number): number {
     const m = (method ?? '').toLowerCase();
-    if (m === 'qris') {
-        return Math.round(amount * FEE_ADMIN_QRIS_PERCENT);
-    }
-    // VA
-    if (bankCode === '014') return FEE_ADMIN_BCA; // BCA
+    if (m === 'qris') return Math.round(amount * FEE_ADMIN_QRIS_PERCENT);
+    if (bankCode === '014') return FEE_ADMIN_BCA;
     return FEE_ADMIN_VA;
 }
 
 // ============================================================
-// CALLBACK LINKQU — Topup & Withdraw
-// POST /api/wallet/callback
+// CALLBACK LINKQU
 // ============================================================
 router.post('/callback', async (req: Request, res: Response) => {
     const body = req.body ?? {};
@@ -32,14 +29,9 @@ router.post('/callback', async (req: Request, res: Response) => {
 
     logger.info('📥 [LinkQu Callback]', { partner_reff, status, va_code });
 
-    if (!partner_reff) {
-        return res.status(200).send('OK');
-    }
+    if (!partner_reff) return res.status(200).send('OK');
 
     try {
-        // ============================================================
-        // 1. CEK APAKAH INI TOPUP
-        // ============================================================
         const { data: topup } = await supabaseAdmin
             .from('wallet_topups')
             .select('*')
@@ -51,9 +43,6 @@ router.post('/callback', async (req: Request, res: Response) => {
             return res.status(200).json({ status: 'SUCCESS', message: 'Topup diproses' });
         }
 
-        // ============================================================
-        // 2. CEK APAKAH INI WITHDRAW
-        // ============================================================
         const { data: wd } = await supabaseAdmin
             .from('wallet_withdrawals')
             .select('*')
@@ -99,12 +88,15 @@ async function handleTopupCallback(
                 .update({ status: 'FAILED', updated_at: new Date().toISOString() })
                 .eq('id', topup.id);
 
-            // ✅ Notifikasi gagal
-            await sendTopupNotification(topup.user_id, 'topup_failed', {
+            // ✅ Notifikasi gagal via notificationService
+            await notificationService.sendToUser(topup.user_id, {
                 title: 'Topup Gagal',
                 body: `Topup Rp${Number(topup.amount).toLocaleString('id-ID')} gagal atau kadaluarsa.`,
-                amount: Number(topup.amount),
-                partner_reff: topup.partner_reff,
+                data: {
+                    type: 'topup_failed',
+                    amount: Number(topup.amount),
+                    partner_reff: topup.partner_reff,
+                },
             });
 
             logger.info('❌ Topup FAILED', { partner_reff: topup.partner_reff });
@@ -113,7 +105,7 @@ async function handleTopupCallback(
     }
 
     // ============================================================
-    // Hitung fee admin & jumlah bersih yang masuk saldo
+    // HITUNG FEE ADMIN
     // ============================================================
     const userId = topup.user_id;
     const grossAmount = Number(topup.amount);
@@ -159,7 +151,7 @@ async function handleTopupCallback(
         let newCashDebt = Number(wallet?.cash_debt ?? 0);
         let amountLeft = netAmount;
 
-        // ✅ LANGKAH 1: Lunasi utang cash DULU
+        // LANGKAH 1: Lunasi utang cash DULU
         let debtPaid = 0;
         if (newCashDebt > 0) {
             debtPaid = Math.min(newCashDebt, amountLeft);
@@ -167,10 +159,10 @@ async function handleTopupCallback(
             amountLeft = amountLeft - debtPaid;
         }
 
-        // ✅ LANGKAH 2: Sisa masuk saldo
+        // LANGKAH 2: Sisa masuk saldo
         newBalance = newBalance + amountLeft;
 
-        // ✅ LANGKAH 3: Update wallet
+        // LANGKAH 3: Update wallet
         await supabaseAdmin
             .from('driver_wallets')
             .update({
@@ -181,7 +173,7 @@ async function handleTopupCallback(
             })
             .eq('driver_id', userId);
 
-        // ✅ LANGKAH 4: Ledger — kredit topup (net setelah fee)
+        // LANGKAH 4: Ledger topup
         await supabaseAdmin.from('driver_wallet_ledger').insert({
             driver_id: userId,
             entry_type: 'topup',
@@ -201,7 +193,7 @@ async function handleTopupCallback(
             },
         });
 
-        // ✅ LANGKAH 5: Ledger — pelunasan utang (kalau ada)
+        // LANGKAH 5: Ledger pelunasan utang
         if (debtPaid > 0) {
             await supabaseAdmin.from('driver_wallet_ledger').insert({
                 driver_id: userId,
@@ -230,9 +222,7 @@ async function handleTopupCallback(
             newCashDebt,
         });
     } else {
-        // ============================================================
         // CUSTOMER
-        // ============================================================
         await supabaseAdmin
             .from('wallets')
             .upsert(
@@ -284,14 +274,17 @@ async function handleTopupCallback(
         })
         .eq('id', topup.id);
 
-    // ✅ Notifikasi sukses
-    await sendTopupNotification(userId, 'topup_success', {
+    // ✅ Notifikasi sukses via notificationService (Socket.IO + Expo Push)
+    await notificationService.sendToUser(userId, {
         title: 'Topup Berhasil',
         body: `Saldo Rp${netAmount.toLocaleString('id-ID')} sudah masuk (fee admin Rp${adminFee.toLocaleString('id-ID')}).`,
-        amount: netAmount,
-        gross_amount: grossAmount,
-        admin_fee: adminFee,
-        partner_reff: topup.partner_reff,
+        data: {
+            type: 'topup_success',
+            amount: netAmount,
+            gross_amount: grossAmount,
+            admin_fee: adminFee,
+            partner_reff: topup.partner_reff,
+        },
     });
 }
 
@@ -316,11 +309,14 @@ async function handleWithdrawCallback(wd: any, status: string) {
             })
             .eq('id', wd.id);
 
-        await sendTopupNotification(wd.user_id, 'withdraw_success', {
+        await notificationService.sendToUser(wd.user_id, {
             title: 'Penarikan Berhasil',
             body: `Penarikan Rp${Number(wd.amount).toLocaleString('id-ID')} berhasil.`,
-            amount: Number(wd.amount),
-            inquiry_reff: wd.inquiry_reff,
+            data: {
+                type: 'withdraw_success',
+                amount: Number(wd.amount),
+                inquiry_reff: wd.inquiry_reff,
+            },
         });
 
         logger.info('✅ Withdraw SUCCESS', { inquiry_reff: wd.inquiry_reff });
@@ -396,11 +392,14 @@ async function handleWithdrawCallback(wd: any, status: string) {
             })
             .eq('id', wd.id);
 
-        await sendTopupNotification(userId, 'withdraw_failed', {
+        await notificationService.sendToUser(userId, {
             title: 'Penarikan Gagal',
             body: `Penarikan Rp${amount.toLocaleString('id-ID')} gagal. Saldo sudah dikembalikan.`,
-            amount,
-            inquiry_reff: wd.inquiry_reff,
+            data: {
+                type: 'withdraw_failed',
+                amount,
+                inquiry_reff: wd.inquiry_reff,
+            },
         });
 
         logger.info('❌ Withdraw FAILED + refund', {
@@ -408,47 +407,6 @@ async function handleWithdrawCallback(wd: any, status: string) {
             userId,
             amount,
         });
-    }
-}
-
-// ============================================================
-// HELPER: KIRIM NOTIFIKASI
-// ============================================================
-async function sendTopupNotification(
-    userId: string,
-    type: string,
-    payload: {
-        title: string;
-        body: string;
-        amount?: number;
-        gross_amount?: number;
-        admin_fee?: number;
-        partner_reff?: string;
-        inquiry_reff?: string;
-    }
-) {
-    try {
-        await supabaseAdmin.from('notifications').insert({
-            user_id: userId,
-            title: payload.title,
-            body: payload.body,
-            data: payload,
-            channel: 'both',
-            is_read: false,
-        });
-
-        // Log juga ke notification_log
-        await supabaseAdmin.from('notification_log').insert({
-            user_id: userId,
-            type,
-            title: payload.title,
-            body: payload.body,
-            ai: false,
-        });
-
-        logger.info('🔔 Notifikasi terkirim', { userId, type });
-    } catch (err: any) {
-        logger.error('❌ Gagal kirim notifikasi', { error: err.message, userId, type });
     }
 }
 

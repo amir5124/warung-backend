@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { supabaseAdmin } from '../../config/supabase';
 import { ApiError } from '../../utils/ApiError';
 import { logger } from '../../config/logger';
+import { notificationService } from '../notification/notification.service';  // ✅ TAMBAH
 
 // ============================================================
 // KONFIGURASI LINKQU
@@ -20,9 +21,9 @@ const LINKQU_CONFIG = {
 // ============================================================
 // KONSTANTA FEE ADMIN
 // ============================================================
-const FEE_ADMIN_VA = 2500;              // VA default
-const FEE_ADMIN_BCA = 4000;             // VA BCA khusus
-const FEE_ADMIN_QRIS_PERCENT = 0.008;   // QRIS 0.8%
+const FEE_ADMIN_VA = 2500;
+const FEE_ADMIN_BCA = 4000;
+const FEE_ADMIN_QRIS_PERCENT = 0.008;
 
 export function calculateAdminFee(
     method: string,
@@ -30,10 +31,8 @@ export function calculateAdminFee(
     amount: number
 ): number {
     const m = (method ?? '').toLowerCase();
-    if (m === 'qris') {
-        return Math.round(amount * FEE_ADMIN_QRIS_PERCENT);
-    }
-    if (bankCode === '014') return FEE_ADMIN_BCA; // BCA
+    if (m === 'qris') return Math.round(amount * FEE_ADMIN_QRIS_PERCENT);
+    if (bankCode === '014') return FEE_ADMIN_BCA;
     return FEE_ADMIN_VA;
 }
 
@@ -588,8 +587,9 @@ class WalletService {
 
             // ============================================================
             // ✅ KIRIM NOTIFIKASI "Kode Pembayaran Dibuat"
+            //    via notificationService (Socket.IO + Expo Push)
             // ============================================================
-            await this.sendNotification(userId, 'topup_created', {
+            await notificationService.sendToUser(userId, {
                 title: 'Kode Pembayaran Dibuat',
                 body:
                     dto.method === 'qris'
@@ -995,44 +995,8 @@ class WalletService {
     }
 
     // ============================================================
-    // HELPER — NOTIFIKASI
+    // HELPER — FORMAT EXPIRED
     // ============================================================
-    private async sendNotification(
-        userId: string,
-        type: string,
-        payload: { title: string; body: string; data?: any }
-    ) {
-        try {
-            // Insert ke tabel notifications
-            await supabaseAdmin.from('notifications').insert({
-                user_id: userId,
-                title: payload.title,
-                body: payload.body,
-                data: payload.data ?? null,
-                channel: 'both',
-                is_read: false,
-            });
-
-            // Log ke notification_log
-            await supabaseAdmin.from('notification_log').insert({
-                user_id: userId,
-                type,
-                title: payload.title,
-                body: payload.body,
-                ai: false,
-            });
-
-            logger.info('🔔 Notifikasi terkirim', { userId, type });
-        } catch (err: any) {
-            // Jangan throw — notifikasi gagal bukan error fatal
-            logger.error('❌ Gagal kirim notifikasi', {
-                error: err?.message,
-                userId,
-                type,
-            });
-        }
-    }
-
     private formatExpiredDisplay(expired: string): string {
         const dd = expired.slice(6, 8);
         const mm = expired.slice(4, 6);
