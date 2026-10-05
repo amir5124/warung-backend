@@ -10,7 +10,7 @@ import { logger } from '../../config/logger';
 // ============================================================
 const LINKQU_CONFIG = {
     clientId: process.env.LINKQU_CLIENT_ID ?? 'fdf1a7d7-076c-4430-80f6-95ea4a37ed7a',
-    clientSecret: process.env.LINKQU_CLIENT_SECRET ?? 'GFGICTz4xnPRGil',
+    clientSecret: process.env.LINKQU_CLIENT_SECRET ?? 'WqbK9mSyehyenvy9zY6MNtM1s',
     username: process.env.LINKQU_USERNAME ?? 'LI153QRSA',
     pin: process.env.LINKQU_PIN ?? 'GFGICTz4xnPRGil',
     serverKey: process.env.LINKQU_SERVER_KEY ?? 'GFGICTz4xnPRGil',
