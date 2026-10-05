@@ -108,20 +108,22 @@ async function handleTopupCallback(
     // HITUNG FEE ADMIN
     // ============================================================
     const userId = topup.user_id;
-    const grossAmount = Number(topup.amount);
+    const grossAmount = Number(topup.amount);   // ← ini = nominal + fee (Rp12.500)
     const method = (topup.method ?? '').toLowerCase();
     const bankCode = topup.bank_code ?? null;
 
+    // ✅ Hitung fee admin
     const adminFee = calculateAdminFee(method, bankCode, grossAmount);
+    // ✅ Nominal yang masuk saldo = gross - fee
     const netAmount = Math.max(0, grossAmount - adminFee);
 
     logger.info('💰 Fee admin', {
         partner_reff: topup.partner_reff,
         method,
         bankCode,
-        grossAmount,
-        adminFee,
-        netAmount,
+        grossAmount,      // Rp12.500 (dibayar user)
+        adminFee,         // Rp2.500
+        netAmount,        // Rp10.000 (masuk saldo)
     });
 
     // Cek apakah user driver

@@ -443,9 +443,6 @@ class WalletService {
         return data ?? [];
     }
 
-    // ============================================================
-    // TOPUP — INQUIRY (VA / QRIS)
-    // ============================================================
     async topupInquiry(userId: string, dto: {
         amount: number;
         method: 'va' | 'qris';
@@ -454,6 +451,20 @@ class WalletService {
         console.log('🚀 [topupInquiry] START', { userId, dto });
 
         if (dto.amount < 10000) throw ApiError.badRequest('Minimal topup Rp10.000');
+
+        // ✅ HITUNG FEE ADMIN DULU
+        const adminFee = calculateAdminFee(
+            dto.method,
+            dto.bank_code ?? null,
+            dto.amount
+        );
+        const totalAmount = dto.amount + adminFee;   // ← yang dikirim ke LinkQu
+
+        console.log('💰 [topupInquiry] Fee & total:', {
+            nominal: dto.amount,
+            adminFee,
+            totalAmount,
+        });
 
         const { data: profile } = await supabaseAdmin
             .from('profiles')
@@ -473,7 +484,7 @@ class WalletService {
         if (dto.method === 'qris') {
             endpoint = '/transaction/create/qris';
             const signature = this.signQris({
-                amount: dto.amount,
+                amount: totalAmount,      // ← pakai total (nominal + fee)
                 expired,
                 partner_reff: partnerReff,
                 customer_id: userId,
@@ -483,11 +494,11 @@ class WalletService {
             payload = {
                 username: LINKQU_CONFIG.username,
                 pin: LINKQU_CONFIG.pin,
-                amount: dto.amount,
+                amount: totalAmount,      // ← pakai total
                 partner_reff: partnerReff,
                 expired,
                 signature,
-                url_callback: 'https://warung.siappgo.id/api/wallet/callback',
+                url_callback: 'https://warung.siappung.id/api/wallet/callback',
                 customer_id: userId,
                 customer_name: customerName,
                 customer_email: customerEmail,
@@ -497,7 +508,7 @@ class WalletService {
             endpoint = '/transaction/create/va';
             const realBankCode = BANK_MAPPING[dto.bank_code.toUpperCase()] || dto.bank_code;
             const signature = this.signVa({
-                amount: dto.amount,
+                amount: totalAmount,      // ← pakai total
                 expired,
                 bank_code: realBankCode,
                 partner_reff: partnerReff,
@@ -508,17 +519,18 @@ class WalletService {
             payload = {
                 username: LINKQU_CONFIG.username,
                 pin: LINKQU_CONFIG.pin,
-                amount: dto.amount,
+                amount: totalAmount,      // ← pakai total
                 bank_code: realBankCode,
                 partner_reff: partnerReff,
                 expired,
                 signature,
-                url_callback: 'https://warung.siappgo.id/api/wallet/callback',
+                url_callback: 'https://warung.siappung.id/api/wallet/callback',
                 customer_id: userId,
                 customer_name: customerName,
                 customer_email: customerEmail,
             };
         }
+
 
         const url = `${LINKQU_CONFIG.baseUrl}${endpoint}`;
         console.log('📤 [LINKQU REQUEST]', { url, payload });
