@@ -16,10 +16,11 @@ export const matchingService = {
         const { data: drivers, error } = await supabaseAdmin.rpc('find_nearby_drivers', {
             p_lat: lat,
             p_lng: lng,
-            p_radius_m: 5000,
+            p_radius_m: 20000,   // ← dari 5000 ke 20000 (20 km)
             p_limit: 20,
             p_tariff_code: tariffCode ?? null,
         });
+
 
         if (error) {
             console.error('[matching] RPC error:', error);
