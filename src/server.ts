@@ -23,6 +23,7 @@ import tariffRoutes from './modules/tariff/tariff.routes';
 import ratingRoutes from './modules/rating/rating.routes';
 import activityRoutes from './modules/activity/activity.routes';
 import walletRoutes from './modules/wallet/wallet.routes';
+import merchantRouter from './modules/merchant/merchant.routes';
 
 
 import { orderTimeoutService } from './modules/order/order-timeout.service';
@@ -53,6 +54,7 @@ app.use('/api/tariffs', tariffRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/activity', activityRoutes);
 app.use('/api/wallet', walletRoutes);
+app.use('/api/merchant', merchantRouter);
 
 app.use(notFound);
 app.use(errorHandler);
