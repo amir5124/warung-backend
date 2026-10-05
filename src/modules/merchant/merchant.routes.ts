@@ -5,8 +5,19 @@ import { requireAuth, requireRole } from '../../middleware/auth';
 
 const router = Router();
 
-// Semua endpoint merchant butuh login & role 'merchant'
+// Semua endpoint butuh login
 router.use(requireAuth);
+
+// ============================================================
+// ENDPOINT PUBLIK (customer/driver browse) — TANPA requireRole
+// ============================================================
+router.get('/nearby', merchantController.findNearby);
+router.get('/:id/menu', merchantController.getPublicMenu);
+router.get('/:id', merchantController.getPublicProfile);
+
+// ============================================================
+// ⚠️ BATAS: Di bawah ini HANYA untuk MERCHANT
+// ============================================================
 router.use(requireRole('merchant'));
 
 // ============================================================

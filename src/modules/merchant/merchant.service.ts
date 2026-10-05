@@ -5,6 +5,101 @@ import { logger } from '../../config/logger';
 
 export const merchantService = {
     // ============================================================
+    // PUBLIC — Browse merchant (customer/driver)
+    // ============================================================
+
+    /**
+     * Cari merchant terdekat dari koordinat customer.
+     * Coba pakai PostGIS function `nearby_merchants` dulu.
+     * Kalau function belum ada → fallback: ambil semua merchant is_open.
+     */
+    async findNearby(lat: number, lng: number, radiusM = 5000) {
+        // Coba RPC (PostGIS)
+        const { data, error } = await supabaseAdmin.rpc('nearby_merchants', {
+            p_lat: lat,
+            p_lng: lng,
+            p_radius: radiusM,
+        });
+
+        if (error) {
+            logger.warn('RPC nearby_merchants gagal, fallback', {
+                error: error.message,
+            });
+
+            // Fallback: ambil merchant yang buka (tanpa distance)
+            const { data: fallback } = await supabaseAdmin
+                .from('merchant_profiles')
+                .select(
+                    'user_id, store_name, description, address, latitude, longitude, logo_url, is_open, rating_avg, total_orders'
+                )
+                .eq('is_open', true)
+                .not('latitude', 'is', null)
+                .not('longitude', 'is', null)
+                .limit(20);
+
+            return fallback ?? [];
+        }
+
+        return data ?? [];
+    },
+
+    /**
+     * Lihat profil publik toko (tanpa data sensitif).
+     */
+    async getPublicProfile(merchantId: string) {
+        const { data, error } = await supabaseAdmin
+            .from('merchant_profiles')
+            .select(
+                'user_id, store_name, description, address, latitude, longitude, logo_url, cover_url, is_open, is_verified, rating_avg, total_orders, open_hours, created_at'
+            )
+            .eq('user_id', merchantId)
+            .maybeSingle();
+
+        if (error) {
+            logger.error('getPublicProfile error', { error, merchantId });
+            throw ApiError.internal('Gagal mengambil profil merchant');
+        }
+
+        return data;
+    },
+
+    /**
+     * Lihat menu publik toko (kategori + item tersedia).
+     */
+    async getPublicMenu(merchantId: string) {
+        const { data: categories, error: catErr } = await supabaseAdmin
+            .from('menu_categories')
+            .select('id, name, sort_order')
+            .eq('merchant_id', merchantId)
+            .order('sort_order', { ascending: true });
+
+        if (catErr) {
+            logger.error('getPublicMenu categories error', { error: catErr, merchantId });
+            throw ApiError.internal('Gagal mengambil kategori menu');
+        }
+
+        const { data: items, error: itemErr } = await supabaseAdmin
+            .from('menu_items')
+            .select(
+                'id, merchant_id, category_id, name, description, price, image_url, is_available, stock'
+            )
+            .eq('merchant_id', merchantId)
+            .eq('is_available', true)
+            .order('created_at', { ascending: false });
+
+        if (itemErr) {
+            logger.error('getPublicMenu items error', { error: itemErr, merchantId });
+            throw ApiError.internal('Gagal mengambil menu');
+        }
+
+        return {
+            merchant_id: merchantId,
+            categories: categories ?? [],
+            items: items ?? [],
+        };
+    },
+
+    // ============================================================
     // UPSERT STORE — buat atau update profil toko
     // ============================================================
     async upsertStore(userId: string, data: {
@@ -42,7 +137,6 @@ export const merchantService = {
 
             payload.latitude = data.latitude;
             payload.longitude = data.longitude;
-            // PostGIS: POINT(lng lat)
             payload.location = `SRID=4326;POINT(${data.longitude} ${data.latitude})`;
         }
 
@@ -58,6 +152,7 @@ export const merchantService = {
         }
         return store;
     },
+
     // ============================================================
     // GET STORE — ambil profil toko milik merchant
     // ============================================================

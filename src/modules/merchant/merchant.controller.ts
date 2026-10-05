@@ -7,6 +7,49 @@ import { ApiError } from '../../utils/ApiError';
 
 export const merchantController = {
     // ============================================================
+    // PUBLIC — Browse merchant (customer/driver)
+    // ============================================================
+
+    /**
+     * GET /api/merchant/nearby?lat=...&lng=...&radius=...
+     * Cari merchant terdekat dari koordinat
+     */
+    findNearby: asyncHandler(async (req: Request, res: Response) => {
+        const lat = Number(req.query.lat);
+        const lng = Number(req.query.lng);
+        const radius = Number(req.query.radius ?? 5000);
+
+        if (Number.isNaN(lat) || Number.isNaN(lng)) {
+            throw ApiError.badRequest('lat & lng wajib valid');
+        }
+        if (Number.isNaN(radius) || radius <= 0) {
+            throw ApiError.badRequest('radius wajib > 0');
+        }
+
+        const data = await merchantService.findNearby(lat, lng, radius);
+        return ok(res, data);
+    }),
+
+    /**
+     * GET /api/merchant/:id
+     * Lihat profil publik toko
+     */
+    getPublicProfile: asyncHandler(async (req: Request, res: Response) => {
+        const data = await merchantService.getPublicProfile(req.params.id);
+        if (!data) throw ApiError.notFound('Merchant tidak ditemukan');
+        return ok(res, data);
+    }),
+
+    /**
+     * GET /api/merchant/:id/menu
+     * Lihat menu toko
+     */
+    getPublicMenu: asyncHandler(async (req: Request, res: Response) => {
+        const data = await merchantService.getPublicMenu(req.params.id);
+        return ok(res, data);
+    }),
+
+    // ============================================================
     // STORE
     // ============================================================
     upsertStore: asyncHandler(async (req: Request, res: Response) => {
