@@ -330,7 +330,17 @@ export const orderService = {
                 : `${input.distance_km.toFixed(1)} km`;
         const fareText = `Rp${Number(delivery_fee).toLocaleString('id-ID')}`;
 
-        // ---- Notif ke driver ----
+        // ⬇️ Ambil items untuk food
+        let itemsForNotif: any[] = [];
+        if (order.type === 'food') {
+            const { data: orderItems } = await supabaseAdmin
+                .from('order_items')
+                .select('menu_item_id, name, variant, qty, price')
+                .eq('order_id', order.id);
+
+            itemsForNotif = orderItems ?? [];
+        }
+
         const orderPayloadForNotif = {
             id: String(order.id),
             order_code: order.order_code,
@@ -353,13 +363,24 @@ export const orderService = {
             delivery_fee: String(order.delivery_fee ?? 0),
             driver_earning: String(order.driver_earning ?? 0),
             total_fare: String(order.total_fare ?? 0),
+            subtotal: String(order.subtotal ?? 0),          // ⬅️ TAMBAH
             payment_method: order.payment_method ?? 'cash',
             tariff_code: order.tariff_code ?? '',
             option_name: order.option_name ?? '',
             customer_name: custProfile?.full_name ?? 'Customer',
             customer_avatar: custProfile?.avatar_url ?? '',
-        };
 
+            // ⬇️ TAMBAH: untuk food
+            items: itemsForNotif,
+            // ⬇️ TAMBAH: untuk send
+            receiver_name: order.receiver_name ?? '',
+            receiver_phone: order.receiver_phone ?? '',
+            sender_name: order.sender_name ?? '',
+            sender_phone: order.sender_phone ?? '',
+            package_type: order.package_type ?? '',
+            package_size: order.package_size ?? '',
+            package_weight: order.package_weight ?? '',
+        };
         for (const d of drivers) {
             try {
                 await notificationService.sendToUser(d.user_id, {
