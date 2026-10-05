@@ -605,12 +605,14 @@ class WalletService {
                 title: 'Kode Pembayaran Dibuat',
                 body:
                     dto.method === 'qris'
-                        ? `Scan QRIS untuk topup Rp${dto.amount.toLocaleString('id-ID')}. Berlaku sampai ${this.formatExpiredDisplay(expired)}.`
-                        : `Transfer ke VA ${data?.virtual_account ?? '-'} sebesar Rp${dto.amount.toLocaleString('id-ID')}. Berlaku sampai ${this.formatExpiredDisplay(expired)}.`,
+                        ? `Scan QRIS untuk topup Rp${totalAmount.toLocaleString('id-ID')} (nominal Rp${dto.amount.toLocaleString('id-ID')} + fee Rp${adminFee.toLocaleString('id-ID')}). Berlaku sampai ${this.formatExpiredDisplay(expired)}.`
+                        : `Transfer ke VA ${data?.virtual_account ?? '-'} sebesar Rp${totalAmount.toLocaleString('id-ID')} (nominal Rp${dto.amount.toLocaleString('id-ID')} + fee Rp${adminFee.toLocaleString('id-ID')}). Berlaku sampai ${this.formatExpiredDisplay(expired)}.`,
                 data: {
                     type: 'topup_created',
                     method: dto.method,
-                    amount: dto.amount,
+                    amount: dto.amount,           // nominal yang masuk saldo
+                    admin_fee: adminFee,          // fee admin
+                    total_amount: totalAmount,    // yang harus ditransfer
                     va_number: data?.virtual_account ?? null,
                     qris_url: data?.imageqris ?? null,
                     partner_reff: partnerReff,
