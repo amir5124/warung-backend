@@ -371,7 +371,7 @@ export const orderService = {
             customer_avatar: custProfile?.avatar_url ?? '',
 
             // ⬇️ TAMBAH: untuk food
-            items: itemsForNotif,
+            // items: itemsForNotif,
             // ⬇️ TAMBAH: untuk send
             receiver_name: order.receiver_name ?? '',
             receiver_phone: order.receiver_phone ?? '',
