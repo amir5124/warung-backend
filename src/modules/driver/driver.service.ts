@@ -138,16 +138,91 @@ export const driverService = {
 
         // Cek juga kalau masih ada order aktif
         if (status === 'online' || status === 'offline') {
-            const { count: activeOrders } = await supabaseAdmin
+            const { data: activeOrders } = await supabaseAdmin
                 .from('orders')
-                .select('id', { count: 'exact', head: true })
+                .select('id, order_code, status, accepted_at, created_at')
                 .eq('driver_id', driverId)
                 .in('status', ['accepted', 'arrived', 'in_progress']);
 
-            if ((activeOrders ?? 0) > 0) {
-                throw ApiError.badRequest(
-                    'Selesaikan order aktif dulu sebelum ubah status'
-                );
+            if (activeOrders && activeOrders.length > 0) {
+                // 🆕 Auto-cleanup order stuck > 6 jam
+                const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+                const now = Date.now();
+
+                const stuckOrders = activeOrders.filter((o) => {
+                    const refTime = o.accepted_at
+                        ? new Date(o.accepted_at).getTime()
+                        : o.created_at
+                            ? new Date(o.created_at).getTime()
+                            : 0;
+                    return refTime && now - refTime > SIX_HOURS_MS;
+                });
+
+                if (stuckOrders.length > 0) {
+                    logger.warn(
+                        '[driver.setStatus] Auto-cancel stuck orders',
+                        {
+                            driverId,
+                            stuckOrderIds: stuckOrders.map((o) => o.id),
+                            stuckOrderCodes: stuckOrders.map(
+                                (o) => o.order_code
+                            ),
+                        }
+                    );
+
+                    const { error: cancelErr } = await supabaseAdmin
+                        .from('orders')
+                        .update({
+                            status: 'cancelled',
+                            cancelled_at: new Date().toISOString(),
+                            cancellation_reason:
+                                'Auto-cancel: order stuck > 6 jam',
+                        })
+                        .in(
+                            'id',
+                            stuckOrders.map((o) => o.id)
+                        );
+
+                    if (cancelErr) {
+                        logger.error(
+                            '[driver.setStatus] Gagal auto-cancel stuck orders',
+                            {
+                                driverId,
+                                error: cancelErr.message,
+                            }
+                        );
+                    } else {
+                        logger.info(
+                            '[driver.setStatus] ✅ Stuck orders di-cancel',
+                            {
+                                driverId,
+                                count: stuckOrders.length,
+                            }
+                        );
+                    }
+
+                    // Cek sisa order aktif (yang belum stuck)
+                    const stuckIds = new Set(
+                        stuckOrders.map((o) => o.id)
+                    );
+                    const remaining = activeOrders.filter(
+                        (o) => !stuckIds.has(o.id)
+                    );
+
+                    if (remaining.length > 0) {
+                        throw ApiError.badRequest(
+                            `Selesaikan order aktif dulu: ${remaining
+                                .map((o) => o.order_code)
+                                .join(', ')}`
+                        );
+                    }
+                    // Kalau semua stuck → lanjut ke update status
+                } else {
+                    // Ada order aktif, tapi belum stuck
+                    throw ApiError.badRequest(
+                        'Selesaikan order aktif dulu sebelum ubah status'
+                    );
+                }
             }
         }
 
@@ -157,8 +232,12 @@ export const driverService = {
             .eq('user_id', driverId);
 
         if (error) throw ApiError.internal(error.message);
-    },
 
+        logger.info('[driver.setStatus] Status updated', {
+            driverId,
+            status,
+        });
+    },
     // ============================================================
     // UPDATE PROFILE
     // ============================================================
