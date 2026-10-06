@@ -127,7 +127,9 @@ export const orderService = {
         let tariffCode: string | null = null;
         let tariffLabel: string | null = null;
 
-        // ---- Hitung tarif ----
+        // ═══════════════════════════════════════════════════════════
+        // HITUNG TARIF
+        // ═══════════════════════════════════════════════════════════
         if (input.tariff_code) {
             const { data: t, error: tErr } = await supabaseAdmin.rpc(
                 'calculate_tariff',
@@ -178,7 +180,9 @@ export const orderService = {
             platform_earning,
         });
 
-        // ---- Subtotal items (food) ----
+        // ═══════════════════════════════════════════════════════════
+        // SUBTOTAL ITEMS (FOOD)
+        // ═══════════════════════════════════════════════════════════
         let subtotal = 0;
         let packaging_fee = 0;
         if (input.items?.length) {
@@ -191,7 +195,9 @@ export const orderService = {
 
         const total_fare = subtotal + delivery_fee + packaging_fee;
 
-        // ---- Generate send_code untuk type 'send' ----
+        // ═══════════════════════════════════════════════════════════
+        // GENERATE SEND CODE
+        // ═══════════════════════════════════════════════════════════
         let sendCode: string | null = null;
         if (input.type === 'send') {
             const { data: codeData, error: codeErr } = await supabaseAdmin.rpc(
@@ -210,7 +216,9 @@ export const orderService = {
             logger.info('[order.create] send_code', { sendCode });
         }
 
-        // ---- Insert order ----
+        // ═══════════════════════════════════════════════════════════
+        // INSERT ORDER
+        // ═══════════════════════════════════════════════════════════
         const { data: order, error } = await supabaseAdmin
             .from('orders')
             .insert({
@@ -272,7 +280,9 @@ export const orderService = {
             send_code: order.send_code,
         });
 
-        // ---- Insert order items (food) ----
+        // ═══════════════════════════════════════════════════════════
+        // INSERT ORDER ITEMS (FOOD)
+        // ═══════════════════════════════════════════════════════════
         if (input.items?.length) {
             const { error: itemsErr } = await supabaseAdmin
                 .from('order_items')
@@ -296,7 +306,9 @@ export const orderService = {
             }
         }
 
-        // ---- Matching driver ----
+        // ═══════════════════════════════════════════════════════════
+        // MATCHING DRIVER
+        // ═══════════════════════════════════════════════════════════
         logger.info('[order.create] Mencari driver...', {
             orderId: order.id,
             type: input.type,
@@ -315,7 +327,49 @@ export const orderService = {
             driverCount: drivers.length,
         });
 
-        // ---- Ambil customer profile untuk notif ----
+        // ═══════════════════════════════════════════════════════════
+        // ✅ AUTO BID — coba autobid order ke driver eligible
+        // ═══════════════════════════════════════════════════════════
+        let autobidDriver: string | null = null;
+
+        if (drivers.length > 0) {
+            try {
+                const { autobidService } = await import('./autobid.service');
+
+                autobidDriver = await autobidService.tryAutoBid(
+                    order.id,
+                    {
+                        type: order.type,
+                        driver_earning: Number(order.driver_earning),
+                        distance_km: Number(order.distance_km),
+                    },
+                    drivers.map((d) => d.user_id)
+                );
+
+                if (autobidDriver) {
+                    logger.info('[order.create] ✅ Autobid sukses', {
+                        orderId: order.id,
+                        driverId: autobidDriver,
+                    });
+                } else {
+                    logger.info(
+                        '[order.create] Autobid tidak ada yang eligible',
+                        {
+                            orderId: order.id,
+                        }
+                    );
+                }
+            } catch (err: any) {
+                logger.warn('[order.create] Autobid error', {
+                    orderId: order.id,
+                    error: err.message,
+                });
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // AMBIL CUSTOMER PROFILE UNTUK NOTIF
+        // ═══════════════════════════════════════════════════════════
         const { data: custProfile } = await supabaseAdmin
             .from('profiles')
             .select('full_name, avatar_url')
@@ -330,7 +384,9 @@ export const orderService = {
                 : `${input.distance_km.toFixed(1)} km`;
         const fareText = `Rp${Number(delivery_fee).toLocaleString('id-ID')}`;
 
-        // ⬇️ Ambil items untuk food
+        // ═══════════════════════════════════════════════════════════
+        // AMBIL ITEMS UNTUK NOTIF
+        // ═══════════════════════════════════════════════════════════
         let itemsForNotif: any[] = [];
         if (order.type === 'food') {
             const { data: orderItems } = await supabaseAdmin
@@ -363,16 +419,17 @@ export const orderService = {
             delivery_fee: String(order.delivery_fee ?? 0),
             driver_earning: String(order.driver_earning ?? 0),
             total_fare: String(order.total_fare ?? 0),
-            subtotal: String(order.subtotal ?? 0),          // ⬅️ TAMBAH
+            subtotal: String(order.subtotal ?? 0),
             payment_method: order.payment_method ?? 'cash',
             tariff_code: order.tariff_code ?? '',
             option_name: order.option_name ?? '',
             customer_name: custProfile?.full_name ?? 'Customer',
             customer_avatar: custProfile?.avatar_url ?? '',
 
-            // ⬇️ TAMBAH: untuk food
-            // items: itemsForNotif,
-            // ⬇️ TAMBAH: untuk send
+            // ✅ Items untuk food
+            items: itemsForNotif,
+
+            // ✅ Untuk send
             receiver_name: order.receiver_name ?? '',
             receiver_phone: order.receiver_phone ?? '',
             sender_name: order.sender_name ?? '',
@@ -381,48 +438,101 @@ export const orderService = {
             package_size: order.package_size ?? '',
             package_weight: order.package_weight ?? '',
         };
-        for (const d of drivers) {
+
+        // ═══════════════════════════════════════════════════════════
+        // NOTIFIKASI
+        // ═══════════════════════════════════════════════════════════
+        if (autobidDriver) {
+            // ── Autobid berhasil: notif ke driver tunggal ──
             try {
-                await notificationService.sendToUser(d.user_id, {
-                    title: 'Orderan baru masuk 🚀',
+                await notificationService.sendToUser(autobidDriver, {
+                    title: '🚀 Kamu dapat order baru (Autobid)',
                     body: `${pickupShort} → ${dropoffShort} · ${jarakText} · ${fareText}`,
                     data: {
                         order_id: String(order.id),
-                        type: 'new_order',
+                        type: 'autobid_accepted',
                         tariff_code: tariffCode ?? '',
                         service: input.type,
                         order: JSON.stringify(orderPayloadForNotif),
                     },
                 });
-                logger.info('[order.create] Notif driver terkirim', {
+
+                logger.info('[order.create] Notif autobid terkirim', {
                     orderId: order.id,
-                    driverId: d.user_id,
+                    driverId: autobidDriver,
                 });
             } catch (err: any) {
-                logger.warn('[order.create] Gagal kirim notif ke driver', {
-                    driverId: d.user_id,
+                logger.warn('[order.create] Gagal notif autobid', {
+                    driverId: autobidDriver,
                     err: err.message,
                 });
             }
-        }
 
-        // ---- Notif ke customer kalau tidak ada driver ----
-        if (drivers.length === 0) {
+            // Notif ke customer — driver sudah dapat
             try {
                 await notificationService.sendToUser(customerId, {
-                    title: 'Mencari driver…',
-                    body: 'Kami sedang mencarikan driver untukmu. Mohon tunggu.',
+                    title: 'Drivermu sudah dapat! 🎉',
+                    body: 'Driver sedang menuju ke lokasimu.',
                     data: {
                         order_id: order.id,
-                        type: 'no_driver_yet',
+                        type: 'driver_accepted',
                         service: input.type,
                     },
                 });
             } catch (err: any) {
-                logger.warn('[order.create] Gagal kirim notif ke customer', {
+                logger.warn('[order.create] Gagal notif customer', {
                     customerId,
                     err: err.message,
                 });
+            }
+        } else {
+            // ── Normal flow: notif ke semua driver ──
+            for (const d of drivers) {
+                try {
+                    await notificationService.sendToUser(d.user_id, {
+                        title: 'Orderan baru masuk 🚀',
+                        body: `${pickupShort} → ${dropoffShort} · ${jarakText} · ${fareText}`,
+                        data: {
+                            order_id: String(order.id),
+                            type: 'new_order',
+                            tariff_code: tariffCode ?? '',
+                            service: input.type,
+                            order: JSON.stringify(orderPayloadForNotif),
+                        },
+                    });
+                    logger.info('[order.create] Notif driver terkirim', {
+                        orderId: order.id,
+                        driverId: d.user_id,
+                    });
+                } catch (err: any) {
+                    logger.warn('[order.create] Gagal kirim notif ke driver', {
+                        driverId: d.user_id,
+                        err: err.message,
+                    });
+                }
+            }
+
+            // ── Notif ke customer kalau tidak ada driver ──
+            if (drivers.length === 0) {
+                try {
+                    await notificationService.sendToUser(customerId, {
+                        title: 'Mencari driver…',
+                        body: 'Kami sedang mencarikan driver untukmu. Mohon tunggu.',
+                        data: {
+                            order_id: order.id,
+                            type: 'no_driver_yet',
+                            service: input.type,
+                        },
+                    });
+                } catch (err: any) {
+                    logger.warn(
+                        '[order.create] Gagal kirim notif ke customer',
+                        {
+                            customerId,
+                            err: err.message,
+                        }
+                    );
+                }
             }
         }
 
@@ -764,15 +874,18 @@ export const orderService = {
         // Log cancel (tanpa socket — andalkan push + polling frontend)
         // ============================================================
         if (status === 'cancelled' && order.driver_id) {
-            logger.info('[order.updateStatus] Order cancelled — notify via push', {
-                orderId,
-                driverId: order.driver_id,
-                cancelledBy: isDriver
-                    ? 'driver'
-                    : isCustomer
-                        ? 'customer'
-                        : 'admin',
-            });
+            logger.info(
+                '[order.updateStatus] Order cancelled — notify via push',
+                {
+                    orderId,
+                    driverId: order.driver_id,
+                    cancelledBy: isDriver
+                        ? 'driver'
+                        : isCustomer
+                            ? 'customer'
+                            : 'admin',
+                }
+            );
         }
 
         // ============================================================
@@ -885,7 +998,6 @@ export const orderService = {
                                 ? `Pesanan dibatalkan oleh ${senderFirstName}`
                                 : 'Pesanan dibatalkan');
                     } else if (isTargetDriver) {
-                        // 🆕 Notif untuk driver — sertakan nama customer
                         title = 'Pesanan dibatalkan ⚠️';
                         body = isCustomer
                             ? `Orderan dibatalkan oleh ${customerFirstName}`
