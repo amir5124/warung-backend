@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { driverController } from './driver.controller';
 import { requireAuth, requireRole } from '../../middleware/auth';
 import { validate } from '../../middleware/validate';
+import { autobidController } from './autobid.controller';
 import {
     updateLocationSchema,
     updateStatusSchema,
@@ -47,6 +48,10 @@ router.put(
     validate(updateDriverSchema),
     driverController.updateProfile
 );
+
+router.get('/autobid', autobidController.get);
+router.put('/autobid', autobidController.update);
+router.get('/autobid/history', autobidController.history);
 
 router.put(
     '/services',
