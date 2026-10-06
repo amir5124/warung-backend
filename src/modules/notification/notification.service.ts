@@ -23,13 +23,13 @@ type UserRole = 'customer' | 'driver' | 'merchant';
 
 const CHANNEL_MAP: Record<UserRole, string> = {
     customer: 'customer-notif-v1',
-    driver: 'driver-orders-v1',
+    driver: 'driver-orders-v4',
     merchant: 'merchant-orders-v1',
 };
 
 const SOUND_MAP: Record<UserRole, string> = {
     customer: 'customer',           // tanpa .mp3
-    driver: 'driver-order',         // tanpa .mp3
+    driver: 'driver_order.mp3',
     merchant: 'merchant-order',     // tanpa .mp3
 };
 
