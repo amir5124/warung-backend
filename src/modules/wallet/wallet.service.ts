@@ -753,7 +753,7 @@ class WalletService {
         // ═══════════════════════════════════════════════════════════
         // ✅ HITUNG FEE ADMIN WITHDRAW
         // ═══════════════════════════════════════════════════════════
-        const WITHDRAW_FEE = 2500;
+        const WITHDRAW_FEE = 3000;
         const totalDeduction = dto.amount + WITHDRAW_FEE;
 
         // Cek saldo terhadap TOTAL (nominal + fee)
@@ -879,7 +879,7 @@ class WalletService {
         // ═══════════════════════════════════════════════════════════
         // ✅ HITUNG FEE ADMIN WITHDRAW
         // ═══════════════════════════════════════════════════════════
-        const feeAdmin = Number(inq.fee_admin ?? 2500);      // Rp2.500
+        const feeAdmin = Number(inq.fee_admin ?? 3000);      // Rp2.500
         const nominalTransfer = Number(inq.amount);          // Rp10.000
         const totalDeduction = nominalTransfer + feeAdmin;   // Rp12.500
 

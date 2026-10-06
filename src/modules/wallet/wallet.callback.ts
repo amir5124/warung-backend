@@ -346,7 +346,7 @@ async function handleWithdrawCallback(wd: any, status: string) {
     // ✅ HITUNG NOMINAL & FEE
     // ═══════════════════════════════════════════════════════════
     const nominal = Number(wd.amount ?? 0);              // Rp10.000
-    const feeAdmin = Number(wd.fee_admin ?? 2500);       // Rp2.500
+    const feeAdmin = Number(wd.fee_admin ?? 3000);       // Rp2.500
     const totalDeduction = nominal + feeAdmin;           // Rp12.500
 
     // ═══════════════════════════════════════════════════════════
