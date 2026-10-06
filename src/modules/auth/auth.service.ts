@@ -1,4 +1,4 @@
-import { supabaseAdmin } from '../../config/supabase';
+import { supabaseAdmin, createAuthClient } from '../../config/supabase';
 import { ApiError } from '../../utils/ApiError';
 import { signJwt } from '../../utils/jwt';
 import { logger } from '../../config/logger';
@@ -39,16 +39,23 @@ export const authService = {
         const userId = authUser.user.id;
 
         if (input.role === 'driver') {
+            // upsert: aman kalau baris sudah dibuat oleh trigger di database
             const { error: dpErr } = await supabaseAdmin
                 .from('driver_profiles')
-                .insert({ user_id: userId });
+                .upsert(
+                    { user_id: userId },
+                    { onConflict: 'user_id', ignoreDuplicates: true }
+                );
             if (dpErr) logger.error('Failed create driver_profile', { error: dpErr, userId });
         }
 
         if (input.role === 'merchant') {
             const { error: mpErr } = await supabaseAdmin
                 .from('merchant_profiles')
-                .insert({ user_id: userId, store_name: input.full_name });
+                .upsert(
+                    { user_id: userId, store_name: input.full_name },
+                    { onConflict: 'user_id', ignoreDuplicates: true }
+                );
             if (mpErr) logger.error('Failed create merchant_profile', { error: mpErr, userId });
         }
 
@@ -66,7 +73,10 @@ export const authService = {
             .maybeSingle();
         if (!profile) throw ApiError.unauthorized('Email or password wrong');
 
-        const { data: signIn, error } = await supabaseAdmin.auth.signInWithPassword({
+        // ✅ FIX: pakai client sekali pakai, BUKAN supabaseAdmin,
+        // supaya sesi user tidak menempel di client admin.
+        const authClient = createAuthClient();
+        const { data: signIn, error } = await authClient.auth.signInWithPassword({
             email: normalizedEmail,
             password,
         });
@@ -86,11 +96,11 @@ export const authService = {
     },
 
     async me(userId: string) {
-        const { data, error } = await supabaseAdmin
+        const { data } = await supabaseAdmin
             .from('profiles')
             .select('*')
             .eq('id', userId)
-            .maybeSingle();       // ⬅️ ganti dari .single()
+            .maybeSingle();
         return data;
-    }
+    },
 };
