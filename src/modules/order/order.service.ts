@@ -186,7 +186,7 @@ export const orderService = {
                 (s: number, i: any) => s + i.qty * i.price,
                 0
             );
-            packaging_fee = 3000;
+            packaging_fee = 0;
         }
 
         const total_fare = subtotal + delivery_fee + packaging_fee;
