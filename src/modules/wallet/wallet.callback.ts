@@ -332,34 +332,57 @@ async function handleWithdrawCallback(wd: any, status: string) {
     const isSuccess = status === 'SUCCESS' || status === 'SETTLED';
     const isFailed = status === 'FAILED' || status === 'REJECTED';
 
-    if (wd.status === 'SUCCESS') {
-        logger.info('ℹ️ Withdraw sudah SUCCESS, skip', { inquiry_reff: wd.inquiry_reff });
+    // ═══════════════════════════════════════════════════════════
+    // ✅ IDEMPOTENCY: skip HANYA kalau sudah SUCCESS + sudah dinotif
+    // ═══════════════════════════════════════════════════════════
+    if (wd.status === 'SUCCESS' && wd.notified_at) {
+        logger.info('ℹ️ Withdraw sudah SUCCESS & dinotif, skip', {
+            inquiry_reff: wd.inquiry_reff,
+        });
         return;
     }
 
+    // ═══════════════════════════════════════════════════════════
+    // HANDLE SUCCESS
+    // ═══════════════════════════════════════════════════════════
     if (isSuccess) {
         await supabaseAdmin
             .from('wallet_withdrawals')
             .update({
                 status: 'SUCCESS',
+                notified_at: new Date().toISOString(),
                 updated_at: new Date().toISOString(),
             })
             .eq('id', wd.id);
 
-        await notificationService.sendToUser(wd.user_id, {
-            title: 'Penarikan Berhasil',
-            body: `Penarikan Rp${Number(wd.amount).toLocaleString('id-ID')} berhasil.`,
-            data: {
-                type: 'withdraw_success',
-                amount: Number(wd.amount),
-                inquiry_reff: wd.inquiry_reff,
-            },
-        });
+        // Kirim notif HANYA kalau belum pernah dinotif
+        if (!wd.notified_at) {
+            await notificationService.sendToUser(wd.user_id, {
+                title: 'Penarikan Berhasil',
+                body: `Penarikan Rp${Number(wd.amount).toLocaleString(
+                    'id-ID'
+                )} berhasil.`,
+                data: {
+                    type: 'withdraw_success',
+                    amount: Number(wd.amount),
+                    inquiry_reff: wd.inquiry_reff,
+                },
+            });
 
-        logger.info('✅ Withdraw SUCCESS', { inquiry_reff: wd.inquiry_reff });
+            logger.info('✅ Withdraw SUCCESS notif sent (callback)', {
+                inquiry_reff: wd.inquiry_reff,
+            });
+        } else {
+            logger.info('ℹ️ Withdraw SUCCESS, notif sudah pernah dikirim', {
+                inquiry_reff: wd.inquiry_reff,
+            });
+        }
         return;
     }
 
+    // ═══════════════════════════════════════════════════════════
+    // HANDLE FAILED (+ REFUND)
+    // ═══════════════════════════════════════════════════════════
     if (isFailed) {
         const userId = wd.user_id;
         const amount = Number(wd.amount);
@@ -425,13 +448,16 @@ async function handleWithdrawCallback(wd: any, status: string) {
             .from('wallet_withdrawals')
             .update({
                 status: 'FAILED',
+                notified_at: new Date().toISOString(),
                 updated_at: new Date().toISOString(),
             })
             .eq('id', wd.id);
 
         await notificationService.sendToUser(userId, {
             title: 'Penarikan Gagal',
-            body: `Penarikan Rp${amount.toLocaleString('id-ID')} gagal. Saldo sudah dikembalikan.`,
+            body: `Penarikan Rp${amount.toLocaleString(
+                'id-ID'
+            )} gagal. Saldo sudah dikembalikan.`,
             data: {
                 type: 'withdraw_failed',
                 amount,
@@ -445,6 +471,7 @@ async function handleWithdrawCallback(wd: any, status: string) {
             amount,
         });
     }
+
 }
 
 export default router;

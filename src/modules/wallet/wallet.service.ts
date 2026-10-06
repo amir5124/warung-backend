@@ -850,17 +850,24 @@ class WalletService {
             .single();
 
         if (!inq) throw ApiError.notFound('Inquiry tidak ditemukan');
-        if (inq.status !== 'INQUIRY') throw ApiError.badRequest('Inquiry sudah diproses');
+        if (inq.status !== 'INQUIRY') {
+            throw ApiError.badRequest('Inquiry sudah diproses');
+        }
 
         const isEmoney = E_WALLET_CODES.includes(inq.bank_code.toUpperCase());
         let endpoint = '/transaction/withdraw/payment';
         let method: 'GET' | 'POST' = 'POST';
-        if (isEmoney) { endpoint = '/transaction/reload/payment'; method = 'GET'; }
-        else if (VA_CODES.includes(inq.bank_code.toUpperCase())) {
+        if (isEmoney) {
+            endpoint = '/transaction/reload/payment';
+            method = 'GET';
+        } else if (VA_CODES.includes(inq.bank_code.toUpperCase())) {
             endpoint = '/transaction/transferva/payment';
         }
 
-        const partnerReffPay = `PAY${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        const partnerReffPay = `PAY${Date.now()}-${crypto
+            .randomBytes(4)
+            .toString('hex')}`;
+
         const sigData = {
             amount: inq.amount,
             accountnumber: inq.account_number,
@@ -887,35 +894,55 @@ class WalletService {
         };
 
         try {
-            const response = method === 'GET'
-                ? await axios.get(`${LINKQU_CONFIG.baseUrl}${endpoint}`, {
-                    params: payload,
-                    headers: {
-                        'client-id': LINKQU_CONFIG.clientId,
-                        'client-secret': LINKQU_CONFIG.clientSecret,
-                    },
+            const response =
+                method === 'GET'
+                    ? await axios.get(`${LINKQU_CONFIG.baseUrl}${endpoint}`, {
+                        params: payload,
+                        headers: {
+                            'client-id': LINKQU_CONFIG.clientId,
+                            'client-secret': LINKQU_CONFIG.clientSecret,
+                        },
+                    })
+                    : await axios.post(
+                        `${LINKQU_CONFIG.baseUrl}${endpoint}`,
+                        payload,
+                        {
+                            headers: {
+                                'client-id': LINKQU_CONFIG.clientId,
+                                'client-secret': LINKQU_CONFIG.clientSecret,
+                            },
+                        }
+                    );
+
+            const finalStatus =
+                response.data.status === 'SUCCESS' ? 'SUCCESS' : 'PENDING';
+
+            // ═══════════════════════════════════════════════════════════
+            // ✅ UPDATE STATUS + notified_at (kalau langsung SUCCESS)
+            // ═══════════════════════════════════════════════════════════
+            const notifiedAtNow =
+                finalStatus === 'SUCCESS' ? new Date().toISOString() : null;
+
+            await supabaseAdmin
+                .from('wallet_withdrawals')
+                .update({
+                    status: finalStatus,
+                    partner_reff_pay: partnerReffPay,
+                    notified_at: notifiedAtNow,
+                    raw_payment_response: response.data,
+                    updated_at: new Date().toISOString(),
                 })
-                : await axios.post(`${LINKQU_CONFIG.baseUrl}${endpoint}`, payload, {
-                    headers: {
-                        'client-id': LINKQU_CONFIG.clientId,
-                        'client-secret': LINKQU_CONFIG.clientSecret,
-                    },
-                });
+                .eq('inquiry_reff', inquiryReff);
 
-            const finalStatus = response.data.status === 'SUCCESS' ? 'SUCCESS' : 'PENDING';
-
-            await supabaseAdmin.from('wallet_withdrawals').update({
-                status: finalStatus,
-                partner_reff_pay: partnerReffPay,
-                raw_payment_response: response.data,
-                updated_at: new Date().toISOString(),
-            }).eq('inquiry_reff', inquiryReff);
-
+            // ═══════════════════════════════════════════════════════════
+            // UPDATE WALLET (potong saldo)
+            // ═══════════════════════════════════════════════════════════
             if (role === 'driver') {
                 const driverWallet = await this.getWallet(userId, 'driver');
                 const newBalance = driverWallet.balance - inq.amount;
 
-                await supabaseAdmin.from('driver_wallets')
+                await supabaseAdmin
+                    .from('driver_wallets')
                     .update({ balance: newBalance })
                     .eq('driver_id', userId);
 
@@ -933,7 +960,8 @@ class WalletService {
                 const customerWallet = await this.getWallet(userId, 'customer');
                 const newBalance = customerWallet.balance - inq.amount;
 
-                await supabaseAdmin.from('wallets')
+                await supabaseAdmin
+                    .from('wallets')
                     .update({ balance: newBalance })
                     .eq('user_id', userId);
 
@@ -947,13 +975,70 @@ class WalletService {
                 });
             }
 
-            return { ...response.data, internal_status: finalStatus, partner_reff: partnerReffPay };
+            // ═══════════════════════════════════════════════════════════
+            // ✅ NOTIFIKASI
+            // - SUCCESS  → "Penarikan Berhasil" (langsung)
+            // - PENDING  → "Penarikan Diproses"
+            // ═══════════════════════════════════════════════════════════
+            try {
+                if (finalStatus === 'SUCCESS') {
+                    await notificationService.sendToUser(userId, {
+                        title: 'Penarikan Berhasil',
+                        body: `Penarikan Rp${Number(inq.amount).toLocaleString(
+                            'id-ID'
+                        )} ke ${inq.bank_code} ${inq.account_number} berhasil.`,
+                        data: {
+                            type: 'withdraw_success',
+                            amount: Number(inq.amount),
+                            inquiry_reff: inquiryReff,
+                            partner_reff: partnerReffPay,
+                        },
+                    });
+
+                    logger.info('✅ Withdraw SUCCESS notif sent (execute)', {
+                        inquiry_reff: inquiryReff,
+                        userId,
+                        amount: inq.amount,
+                    });
+                } else {
+                    await notificationService.sendToUser(userId, {
+                        title: 'Penarikan Diproses',
+                        body: `Penarikan Rp${Number(inq.amount).toLocaleString(
+                            'id-ID'
+                        )} ke ${inq.bank_code} ${inq.account_number} sedang diproses.`,
+                        data: {
+                            type: 'withdraw_pending',
+                            amount: Number(inq.amount),
+                            inquiry_reff: inquiryReff,
+                            partner_reff: partnerReffPay,
+                        },
+                    });
+
+                    logger.info('⏳ Withdraw PENDING notif sent (execute)', {
+                        inquiry_reff: inquiryReff,
+                        userId,
+                        amount: inq.amount,
+                    });
+                }
+            } catch (err: any) {
+                logger.warn('Gagal kirim notif withdraw (execute)', {
+                    inquiry_reff: inquiryReff,
+                    error: err.message,
+                });
+            }
+
+            return {
+                ...response.data,
+                internal_status: finalStatus,
+                partner_reff: partnerReffPay,
+            };
         } catch (err: any) {
-            logger.error('Withdraw execute error', { error: err.response?.data || err.message });
+            logger.error('Withdraw execute error', {
+                error: err.response?.data || err.message,
+            });
             throw ApiError.internal('Gagal memproses withdraw');
         }
     }
-
     // ============================================================
     // SAVED ACCOUNTS
     // ============================================================
