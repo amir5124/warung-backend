@@ -450,15 +450,19 @@ class WalletService {
     }) {
         console.log('🚀 [topupInquiry] START', { userId, dto });
 
-        if (dto.amount < 10000) throw ApiError.badRequest('Minimal topup Rp10.000');
+        if (dto.amount < 10000) {
+            throw ApiError.badRequest('Minimal topup Rp10.000');
+        }
 
-        // ✅ HITUNG FEE ADMIN DULU
+        // ═══════════════════════════════════════════════════════════
+        // ✅ HITUNG FEE ADMIN (ditambahkan ke nominal)
+        // ═══════════════════════════════════════════════════════════
         const adminFee = calculateAdminFee(
             dto.method,
             dto.bank_code ?? null,
             dto.amount
         );
-        const totalAmount = dto.amount + adminFee;   // ← yang dikirim ke LinkQu
+        const totalAmount = dto.amount + adminFee;   // ← yang dibayar user
 
         console.log('💰 [topupInquiry] Fee & total:', {
             nominal: dto.amount,
@@ -484,7 +488,7 @@ class WalletService {
         if (dto.method === 'qris') {
             endpoint = '/transaction/create/qris';
             const signature = this.signQris({
-                amount: totalAmount,      // ← pakai total (nominal + fee)
+                amount: totalAmount,          // ✅ pakai totalAmount
                 expired,
                 partner_reff: partnerReff,
                 customer_id: userId,
@@ -494,7 +498,7 @@ class WalletService {
             payload = {
                 username: LINKQU_CONFIG.username,
                 pin: LINKQU_CONFIG.pin,
-                amount: totalAmount,      // ← pakai total
+                amount: totalAmount,          // ✅ pakai totalAmount
                 partner_reff: partnerReff,
                 expired,
                 signature,
@@ -508,7 +512,7 @@ class WalletService {
             endpoint = '/transaction/create/va';
             const realBankCode = BANK_MAPPING[dto.bank_code.toUpperCase()] || dto.bank_code;
             const signature = this.signVa({
-                amount: totalAmount,      // ← pakai total
+                amount: totalAmount,          // ✅ pakai totalAmount
                 expired,
                 bank_code: realBankCode,
                 partner_reff: partnerReff,
@@ -519,7 +523,7 @@ class WalletService {
             payload = {
                 username: LINKQU_CONFIG.username,
                 pin: LINKQU_CONFIG.pin,
-                amount: totalAmount,      // ← pakai total
+                amount: totalAmount,          // ✅ pakai totalAmount
                 bank_code: realBankCode,
                 partner_reff: partnerReff,
                 expired,
@@ -530,7 +534,6 @@ class WalletService {
                 customer_email: customerEmail,
             };
         }
-
 
         const url = `${LINKQU_CONFIG.baseUrl}${endpoint}`;
         console.log('📤 [LINKQU REQUEST]', { url, payload });
@@ -545,22 +548,16 @@ class WalletService {
                     'User-Agent':
                         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     Accept: 'application/json, text/plain, */*',
-                    'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
                 },
                 body: JSON.stringify(payload),
             });
 
-            console.log('📥 [LINKQU HTTP]', response.status, response.statusText);
+            console.log('📥 [LINKQU HTTP]', response.status);
 
             const rawText = await response.text();
             console.log('📥 [LINKQU RAW]', rawText);
 
             if (!response.ok) {
-                console.error('❌ [LINKQU ERROR]', response.status, rawText.slice(0, 500));
-                logger.error('Topup HTTP error', {
-                    status: response.status,
-                    body: rawText.slice(0, 500),
-                });
                 throw ApiError.internal(
                     `LinkQu error ${response.status}: ${rawText.slice(0, 200)}`
                 );
@@ -570,20 +567,23 @@ class WalletService {
             try {
                 data = JSON.parse(rawText);
             } catch {
-                console.error('❌ [LINKQU] Response bukan JSON:', rawText);
                 throw ApiError.internal('Response LinkQu tidak valid');
             }
 
             console.log('✅ [LINKQU PARSED]', JSON.stringify(data, null, 2));
 
-            // Simpan ke DB
+            // ═══════════════════════════════════════════════════════════
+            // ✅ SIMPAN KE DB dengan nominal + admin_fee + amount (total)
+            // ═══════════════════════════════════════════════════════════
             const { error: dbErr } = await supabaseAdmin
                 .from('wallet_topups')
                 .insert({
                     user_id: userId,
                     partner_reff: partnerReff,
                     method: dto.method,
-                    amount: dto.amount,
+                    amount: totalAmount,          // Rp12.500 (total bayar)
+                    nominal: dto.amount,          // Rp10.000 (nominal topup)
+                    admin_fee: adminFee,          // Rp2.500 (fee)
                     bank_code: dto.bank_code ?? null,
                     va_number: data?.virtual_account ?? null,
                     qris_url: data?.imageqris ?? null,
@@ -597,22 +597,21 @@ class WalletService {
                 logger.error('Insert wallet_topups gagal', { error: dbErr });
             }
 
-            // ============================================================
-            // ✅ KIRIM NOTIFIKASI "Kode Pembayaran Dibuat"
-            //    via notificationService (Socket.IO + Expo Push)
-            // ============================================================
+            // ═══════════════════════════════════════════════════════════
+            // ✅ NOTIFIKASI dengan info lengkap
+            // ═══════════════════════════════════════════════════════════
             await notificationService.sendToUser(userId, {
                 title: 'Kode Pembayaran Dibuat',
                 body:
                     dto.method === 'qris'
-                        ? `Scan QRIS untuk topup Rp${totalAmount.toLocaleString('id-ID')} (nominal Rp${dto.amount.toLocaleString('id-ID')} + fee Rp${adminFee.toLocaleString('id-ID')}). Berlaku sampai ${this.formatExpiredDisplay(expired)}.`
-                        : `Transfer ke VA ${data?.virtual_account ?? '-'} sebesar Rp${totalAmount.toLocaleString('id-ID')} (nominal Rp${dto.amount.toLocaleString('id-ID')} + fee Rp${adminFee.toLocaleString('id-ID')}). Berlaku sampai ${this.formatExpiredDisplay(expired)}.`,
+                        ? `Scan QRIS Rp${totalAmount.toLocaleString('id-ID')} (nominal Rp${dto.amount.toLocaleString('id-ID')} + fee Rp${adminFee.toLocaleString('id-ID')}). Berlaku sampai ${this.formatExpiredDisplay(expired)}.`
+                        : `Transfer VA ${data?.virtual_account ?? '-'} sebesar Rp${totalAmount.toLocaleString('id-ID')} (nominal Rp${dto.amount.toLocaleString('id-ID')} + fee Rp${adminFee.toLocaleString('id-ID')}). Berlaku sampai ${this.formatExpiredDisplay(expired)}.`,
                 data: {
                     type: 'topup_created',
                     method: dto.method,
-                    amount: dto.amount,           // nominal yang masuk saldo
-                    admin_fee: adminFee,          // fee admin
-                    total_amount: totalAmount,    // yang harus ditransfer
+                    amount: dto.amount,           // nominal
+                    admin_fee: adminFee,          // fee
+                    total_amount: totalAmount,    // total bayar
                     va_number: data?.virtual_account ?? null,
                     qris_url: data?.imageqris ?? null,
                     partner_reff: partnerReff,
@@ -630,7 +629,6 @@ class WalletService {
             throw ApiError.internal('Gagal membuat topup');
         }
     }
-
     // ============================================================
     // TOPUP — CHECK STATUS ke LinkQu
     // ============================================================

@@ -65,6 +65,8 @@ router.post('/callback', async (req: Request, res: Response) => {
 // ============================================================
 // HANDLER: TOPUP CALLBACK
 // ============================================================
+// src/modules/wallet/wallet.callback.ts
+
 async function handleTopupCallback(
     topup: any,
     status: string,
@@ -76,57 +78,75 @@ async function handleTopupCallback(
         status === 'SETTLED' ||
         status === 'PAID';
 
+    // Idempotency — skip kalau sudah SUCCESS
     if (topup.status === 'SUCCESS') {
-        logger.info('ℹ️ Topup sudah SUCCESS, skip', { partner_reff: topup.partner_reff });
+        logger.info('ℹ️ Topup sudah SUCCESS, skip', {
+            partner_reff: topup.partner_reff,
+        });
         return;
     }
 
+    // Handle gagal / expired
     if (!isSuccess) {
         if (status === 'FAILED' || status === 'EXPIRED') {
             await supabaseAdmin
                 .from('wallet_topups')
-                .update({ status: 'FAILED', updated_at: new Date().toISOString() })
+                .update({
+                    status: 'FAILED',
+                    updated_at: new Date().toISOString(),
+                })
                 .eq('id', topup.id);
 
-            // ✅ Notifikasi gagal via notificationService
+            const nominal = Number(topup.nominal ?? topup.amount);
+
             await notificationService.sendToUser(topup.user_id, {
                 title: 'Topup Gagal',
-                body: `Topup Rp${Number(topup.amount).toLocaleString('id-ID')} gagal atau kadaluarsa.`,
+                body: `Topup Rp${nominal.toLocaleString('id-ID')} gagal atau kadaluarsa.`,
                 data: {
                     type: 'topup_failed',
-                    amount: Number(topup.amount),
+                    amount: nominal,
                     partner_reff: topup.partner_reff,
                 },
             });
 
-            logger.info('❌ Topup FAILED', { partner_reff: topup.partner_reff });
+            logger.info('❌ Topup FAILED', {
+                partner_reff: topup.partner_reff,
+            });
         }
         return;
     }
 
-    // ============================================================
-    // HITUNG FEE ADMIN
-    // ============================================================
+    // ═══════════════════════════════════════════════════════════
+    // HITUNG NOMINAL & FEE
+    // ═══════════════════════════════════════════════════════════
+    // Model: FEE DITAMBAHKAN (ditanggung customer)
+    // - totalBayar  = nominal + adminFee (Rp12.500)
+    // - nominal     = yang masuk saldo     (Rp10.000)
+    // - adminFee    = fee admin            (Rp2.500)
+    // ═══════════════════════════════════════════════════════════
     const userId = topup.user_id;
-    const grossAmount = Number(topup.amount);   // ← ini = nominal + fee (Rp12.500)
-    const method = (topup.method ?? '').toLowerCase();
-    const bankCode = topup.bank_code ?? null;
 
-    // ✅ Hitung fee admin
-    const adminFee = calculateAdminFee(method, bankCode, grossAmount);
-    // ✅ Nominal yang masuk saldo = gross - fee
-    const netAmount = Math.max(0, grossAmount - adminFee);
+    // ✅ Ambil dari kolom yang disimpan saat create (topupInquiry)
+    const nominal = Number(topup.nominal ?? topup.amount);
+    const adminFee = Number(topup.admin_fee ?? 0);
+    const totalBayar = Number(topup.amount);
+
+    // ✅ Yang masuk saldo = nominal (karena fee ditanggung customer)
+    const netAmount = nominal;
 
     logger.info('💰 Fee admin', {
         partner_reff: topup.partner_reff,
-        method,
-        bankCode,
-        grossAmount,      // Rp12.500 (dibayar user)
-        adminFee,         // Rp2.500
+        method: topup.method,
+        bankCode: topup.bank_code,
+        totalBayar,       // Rp12.500 (dibayar user)
+        nominal,          // Rp10.000 (nominal topup)
+        adminFee,         // Rp2.500 (fee admin)
         netAmount,        // Rp10.000 (masuk saldo)
     });
 
-    // Cek apakah user driver
+    // ═══════════════════════════════════════════════════════════
+    // CEK APAKAH USER = DRIVER
+    // ═══════════════════════════════════════════════════════════
     const { data: driverProfile } = await supabaseAdmin
         .from('driver_profiles')
         .select('user_id')
@@ -135,6 +155,9 @@ async function handleTopupCallback(
 
     const isDriver = !!driverProfile;
 
+    // ═══════════════════════════════════════════════════════════
+    // DRIVER
+    // ═══════════════════════════════════════════════════════════
     if (isDriver) {
         await supabaseAdmin
             .from('driver_wallets')
@@ -153,7 +176,7 @@ async function handleTopupCallback(
         let newCashDebt = Number(wallet?.cash_debt ?? 0);
         let amountLeft = netAmount;
 
-        // LANGKAH 1: Lunasi utang cash DULU
+        // ── LANGKAH 1: Lunasi utang cash DULU ──
         let debtPaid = 0;
         if (newCashDebt > 0) {
             debtPaid = Math.min(newCashDebt, amountLeft);
@@ -161,10 +184,10 @@ async function handleTopupCallback(
             amountLeft = amountLeft - debtPaid;
         }
 
-        // LANGKAH 2: Sisa masuk saldo
+        // ── LANGKAH 2: Sisa masuk saldo ──
         newBalance = newBalance + amountLeft;
 
-        // LANGKAH 3: Update wallet
+        // ── LANGKAH 3: Update wallet ──
         await supabaseAdmin
             .from('driver_wallets')
             .update({
@@ -175,7 +198,7 @@ async function handleTopupCallback(
             })
             .eq('driver_id', userId);
 
-        // LANGKAH 4: Ledger topup
+        // ── LANGKAH 4: Ledger topup ──
         await supabaseAdmin.from('driver_wallet_ledger').insert({
             driver_id: userId,
             entry_type: 'topup',
@@ -183,19 +206,20 @@ async function handleTopupCallback(
             direction: 'in',
             balance_after: newBalance,
             cash_debt_after: newCashDebt,
-            description: `Topup via ${topup.method?.toUpperCase() ?? 'LinkQu'} (gross Rp${grossAmount.toLocaleString('id-ID')} - fee Rp${adminFee.toLocaleString('id-ID')})`,
+            description: `Topup via ${topup.method?.toUpperCase() ?? 'LinkQu'} (nominal Rp${nominal.toLocaleString('id-ID')} + fee Rp${adminFee.toLocaleString('id-ID')})`,
             metadata: {
                 partner_reff: topup.partner_reff,
                 va_code,
                 serialnumber,
-                gross_amount: grossAmount,
+                total_bayar: totalBayar,
+                nominal: nominal,
                 admin_fee: adminFee,
                 net_amount: netAmount,
                 debt_paid: debtPaid,
             },
         });
 
-        // LANGKAH 5: Ledger pelunasan utang
+        // ── LANGKAH 5: Ledger pelunasan utang (kalau ada) ──
         if (debtPaid > 0) {
             await supabaseAdmin.from('driver_wallet_ledger').insert({
                 driver_id: userId,
@@ -216,15 +240,20 @@ async function handleTopupCallback(
         logger.info('✅ Topup SUCCESS (driver)', {
             partner_reff: topup.partner_reff,
             userId,
-            grossAmount,
+            totalBayar,
+            nominal,
             adminFee,
             netAmount,
             debtPaid,
             newBalance,
             newCashDebt,
         });
-    } else {
-        // CUSTOMER
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // CUSTOMER
+    // ═══════════════════════════════════════════════════════════
+    else {
         await supabaseAdmin
             .from('wallets')
             .upsert(
@@ -254,20 +283,23 @@ async function handleTopupCallback(
             amount: netAmount,
             balance_after: newBalance,
             reference_id: topup.partner_reff,
-            description: `Topup via ${topup.method?.toUpperCase() ?? 'LinkQu'} (gross Rp${grossAmount.toLocaleString('id-ID')} - fee Rp${adminFee.toLocaleString('id-ID')})`,
+            description: `Topup via ${topup.method?.toUpperCase() ?? 'LinkQu'} (nominal Rp${nominal.toLocaleString('id-ID')} + fee Rp${adminFee.toLocaleString('id-ID')})`,
         });
 
         logger.info('✅ Topup SUCCESS (customer)', {
             partner_reff: topup.partner_reff,
             userId,
-            grossAmount,
+            totalBayar,
+            nominal,
             adminFee,
             netAmount,
             newBalance,
         });
     }
 
-    // Update status topup jadi SUCCESS
+    // ═══════════════════════════════════════════════════════════
+    // UPDATE STATUS TOPUP → SUCCESS
+    // ═══════════════════════════════════════════════════════════
     await supabaseAdmin
         .from('wallet_topups')
         .update({
@@ -276,15 +308,18 @@ async function handleTopupCallback(
         })
         .eq('id', topup.id);
 
-    // ✅ Notifikasi sukses via notificationService (Socket.IO + Expo Push)
+    // ═══════════════════════════════════════════════════════════
+    // NOTIFIKASI SUKSES
+    // ═══════════════════════════════════════════════════════════
     await notificationService.sendToUser(userId, {
         title: 'Topup Berhasil',
         body: `Saldo Rp${netAmount.toLocaleString('id-ID')} sudah masuk (fee admin Rp${adminFee.toLocaleString('id-ID')}).`,
         data: {
             type: 'topup_success',
-            amount: netAmount,
-            gross_amount: grossAmount,
-            admin_fee: adminFee,
+            amount: netAmount,             // nominal yang masuk
+            nominal: nominal,              // nominal topup
+            total_bayar: totalBayar,       // total bayar
+            admin_fee: adminFee,           // fee
             partner_reff: topup.partner_reff,
         },
     });
