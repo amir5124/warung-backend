@@ -15,7 +15,7 @@ const router = Router();
 
 const uploadDocs = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024 },  // 5MB per file
+    limits: { fileSize: 5 * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
         const allowed = ['image/jpeg', 'image/png', 'image/webp'];
         if (allowed.includes(file.mimetype)) {
@@ -30,6 +30,15 @@ const uploadDocs = multer({
 // Endpoint PUBLIK
 // ============================================================
 router.get('/nearby', driverController.nearby);
+
+// ============================================================
+// AUTO BID (driver only) — ✅ FIX
+// ============================================================
+router.use('/autobid', requireAuth, requireRole('driver'));
+
+router.get('/autobid', autobidController.get);
+router.put('/autobid', autobidController.update);
+router.get('/autobid/history', autobidController.history);
 
 // ============================================================
 // Endpoint DRIVER ONLY
@@ -48,10 +57,6 @@ router.put(
     validate(updateDriverSchema),
     driverController.updateProfile
 );
-
-router.get('/autobid', autobidController.get);
-router.put('/autobid', autobidController.update);
-router.get('/autobid/history', autobidController.history);
 
 router.put(
     '/services',
@@ -99,7 +104,7 @@ router.post(
         { name: 'ktp', maxCount: 1 },
         { name: 'sim', maxCount: 1 },
         { name: 'stnk', maxCount: 1 },
-        { name: 'selfie', maxCount: 1 },   // 🆕 tambah
+        { name: 'selfie', maxCount: 1 },
     ]),
     driverController.submitVerification
 );
