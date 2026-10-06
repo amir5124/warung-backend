@@ -343,6 +343,13 @@ async function handleWithdrawCallback(wd: any, status: string) {
     }
 
     // ═══════════════════════════════════════════════════════════
+    // ✅ HITUNG NOMINAL & FEE
+    // ═══════════════════════════════════════════════════════════
+    const nominal = Number(wd.amount ?? 0);              // Rp10.000
+    const feeAdmin = Number(wd.fee_admin ?? 2500);       // Rp2.500
+    const totalDeduction = nominal + feeAdmin;           // Rp12.500
+
+    // ═══════════════════════════════════════════════════════════
     // HANDLE SUCCESS
     // ═══════════════════════════════════════════════════════════
     if (isSuccess) {
@@ -359,18 +366,24 @@ async function handleWithdrawCallback(wd: any, status: string) {
         if (!wd.notified_at) {
             await notificationService.sendToUser(wd.user_id, {
                 title: 'Penarikan Berhasil',
-                body: `Penarikan Rp${Number(wd.amount).toLocaleString(
-                    'id-ID'
-                )} berhasil.`,
+                body:
+                    `Penarikan Rp${nominal.toLocaleString('id-ID')} berhasil. ` +
+                    `Fee admin Rp${feeAdmin.toLocaleString('id-ID')}. ` +
+                    `Total dipotong Rp${totalDeduction.toLocaleString('id-ID')}.`,
                 data: {
                     type: 'withdraw_success',
-                    amount: Number(wd.amount),
+                    amount: nominal,
+                    fee_admin: feeAdmin,
+                    total_deduction: totalDeduction,
                     inquiry_reff: wd.inquiry_reff,
                 },
             });
 
             logger.info('✅ Withdraw SUCCESS notif sent (callback)', {
                 inquiry_reff: wd.inquiry_reff,
+                nominal,
+                feeAdmin,
+                totalDeduction,
             });
         } else {
             logger.info('ℹ️ Withdraw SUCCESS, notif sudah pernah dikirim', {
@@ -381,11 +394,10 @@ async function handleWithdrawCallback(wd: any, status: string) {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // HANDLE FAILED (+ REFUND)
+    // HANDLE FAILED (+ REFUND TOTAL: nominal + fee)
     // ═══════════════════════════════════════════════════════════
     if (isFailed) {
         const userId = wd.user_id;
-        const amount = Number(wd.amount);
 
         const { data: driverProfile } = await supabaseAdmin
             .from('driver_profiles')
@@ -402,7 +414,9 @@ async function handleWithdrawCallback(wd: any, status: string) {
                 .eq('driver_id', userId)
                 .single();
 
-            const newBalance = Number(wallet?.balance ?? 0) + amount;
+            // ✅ Refund TOTAL (nominal + fee)
+            const newBalance =
+                Number(wallet?.balance ?? 0) + totalDeduction;
             const cashDebt = Number(wallet?.cash_debt ?? 0);
 
             await supabaseAdmin
@@ -413,12 +427,19 @@ async function handleWithdrawCallback(wd: any, status: string) {
             await supabaseAdmin.from('driver_wallet_ledger').insert({
                 driver_id: userId,
                 entry_type: 'adjustment',
-                amount,
+                amount: totalDeduction,           // ⬅️ total Rp12.500
                 direction: 'in',
                 balance_after: newBalance,
                 cash_debt_after: cashDebt,
-                description: `Refund withdraw gagal #${wd.inquiry_reff}`,
-                metadata: { inquiry_reff: wd.inquiry_reff },
+                description:
+                    `Refund withdraw gagal #${wd.inquiry_reff} ` +
+                    `(nominal Rp${nominal.toLocaleString('id-ID')} + fee Rp${feeAdmin.toLocaleString('id-ID')})`,
+                metadata: {
+                    inquiry_reff: wd.inquiry_reff,
+                    nominal,
+                    fee_admin: feeAdmin,
+                    total_refund: totalDeduction,
+                },
             });
         } else {
             const { data: wallet } = await supabaseAdmin
@@ -427,7 +448,9 @@ async function handleWithdrawCallback(wd: any, status: string) {
                 .eq('user_id', userId)
                 .single();
 
-            const newBalance = Number(wallet?.balance ?? 0) + amount;
+            // ✅ Refund TOTAL (nominal + fee)
+            const newBalance =
+                Number(wallet?.balance ?? 0) + totalDeduction;
 
             await supabaseAdmin
                 .from('wallets')
@@ -437,10 +460,12 @@ async function handleWithdrawCallback(wd: any, status: string) {
             await supabaseAdmin.from('wallet_transactions').insert({
                 user_id: userId,
                 type: 'withdraw_refund',
-                amount,
+                amount: totalDeduction,           // ⬅️ total Rp12.500
                 balance_after: newBalance,
                 reference_id: wd.inquiry_reff,
-                description: 'Refund withdraw gagal',
+                description:
+                    `Refund withdraw gagal ` +
+                    `(nominal Rp${nominal.toLocaleString('id-ID')} + fee Rp${feeAdmin.toLocaleString('id-ID')})`,
             });
         }
 
@@ -455,20 +480,24 @@ async function handleWithdrawCallback(wd: any, status: string) {
 
         await notificationService.sendToUser(userId, {
             title: 'Penarikan Gagal',
-            body: `Penarikan Rp${amount.toLocaleString(
-                'id-ID'
-            )} gagal. Saldo sudah dikembalikan.`,
+            body:
+                `Penarikan Rp${nominal.toLocaleString('id-ID')} gagal. ` +
+                `Saldo Rp${totalDeduction.toLocaleString('id-ID')} sudah dikembalikan.`,
             data: {
                 type: 'withdraw_failed',
-                amount,
+                amount: nominal,
+                fee_admin: feeAdmin,
+                total_refund: totalDeduction,
                 inquiry_reff: wd.inquiry_reff,
             },
         });
 
-        logger.info('❌ Withdraw FAILED + refund', {
+        logger.info('❌ Withdraw FAILED + refund total', {
             inquiry_reff: wd.inquiry_reff,
             userId,
-            amount,
+            nominal,
+            feeAdmin,
+            totalRefund: totalDeduction,
         });
     }
 

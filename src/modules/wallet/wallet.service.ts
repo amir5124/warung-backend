@@ -750,9 +750,18 @@ class WalletService {
             ? await this.getWallet(userId, 'driver')
             : await this.getWallet(userId, 'customer');
 
-        if (wallet.balance < dto.amount) {
+        // ═══════════════════════════════════════════════════════════
+        // ✅ HITUNG FEE ADMIN WITHDRAW
+        // ═══════════════════════════════════════════════════════════
+        const WITHDRAW_FEE = 2500;
+        const totalDeduction = dto.amount + WITHDRAW_FEE;
+
+        // Cek saldo terhadap TOTAL (nominal + fee)
+        if (wallet.balance < totalDeduction) {
             throw ApiError.badRequest(
-                `Saldo tidak cukup. Saldo: Rp${wallet.balance.toLocaleString('id-ID')}`
+                `Saldo tidak cukup. Butuh Rp${totalDeduction.toLocaleString('id-ID')} ` +
+                `(nominal Rp${dto.amount.toLocaleString('id-ID')} + fee Rp${WITHDRAW_FEE.toLocaleString('id-ID')}). ` +
+                `Saldo: Rp${wallet.balance.toLocaleString('id-ID')}`
             );
         }
 
@@ -779,8 +788,9 @@ class WalletService {
             method = 'POST';
         }
 
+        // ✅ Signature pakai nominal yang ditransfer (bukan total)
         const sigData = {
-            amount: dto.amount,
+            amount: dto.amount,              // ⬅️ nominal ke rekening
             accountnumber: dto.account_number,
             bankcode: realBankCode,
             partnerreff: inquiryReff,
@@ -790,12 +800,13 @@ class WalletService {
             .update(JSON.stringify(sigData))
             .digest('hex');
 
+        // ✅ Payload LinkQu: amount = nominal (bukan total)
         const params = {
             username: LINKQU_CONFIG.username,
             pin: LINKQU_CONFIG.pin,
             bankcode: realBankCode,
             accountnumber: dto.account_number,
-            amount: dto.amount,
+            amount: dto.amount,              // ⬅️ nominal ke rekening
             partner_reff: inquiryReff,
             signature,
         };
@@ -816,24 +827,35 @@ class WalletService {
                     },
                 });
 
+            // ═══════════════════════════════════════════════════════════
+            // ✅ SIMPAN DENGAN fee_admin
+            // ═══════════════════════════════════════════════════════════
             await supabaseAdmin.from('wallet_withdrawals').insert({
                 user_id: userId,
                 inquiry_reff: response.data.inquiry_reff ?? inquiryReff,
                 partner_reff: inquiryReff,
                 bank_code: realBankCode,
                 account_number: dto.account_number,
-                amount: dto.amount,
+                amount: dto.amount,              // ⬅️ nominal ke rekening (Rp10.000)
+                fee_admin: WITHDRAW_FEE,         // ⬅️ fee (Rp2.500)
                 status: 'INQUIRY',
                 raw_response: response.data,
             });
 
-            return { ...response.data, partner_reff: inquiryReff };
+            return {
+                ...response.data,
+                partner_reff: inquiryReff,
+                amount: dto.amount,
+                fee_admin: WITHDRAW_FEE,
+                total_deduction: totalDeduction,
+            };
         } catch (err: any) {
-            logger.error('Withdraw inquiry error', { error: err.response?.data || err.message });
+            logger.error('Withdraw inquiry error', {
+                error: err.response?.data || err.message,
+            });
             throw ApiError.internal('Gagal inquiry withdraw');
         }
     }
-
     // ============================================================
     // WITHDRAW — EXECUTE
     // ============================================================
@@ -854,6 +876,13 @@ class WalletService {
             throw ApiError.badRequest('Inquiry sudah diproses');
         }
 
+        // ═══════════════════════════════════════════════════════════
+        // ✅ HITUNG FEE ADMIN WITHDRAW
+        // ═══════════════════════════════════════════════════════════
+        const feeAdmin = Number(inq.fee_admin ?? 2500);      // Rp2.500
+        const nominalTransfer = Number(inq.amount);          // Rp10.000
+        const totalDeduction = nominalTransfer + feeAdmin;   // Rp12.500
+
         const isEmoney = E_WALLET_CODES.includes(inq.bank_code.toUpperCase());
         let endpoint = '/transaction/withdraw/payment';
         let method: 'GET' | 'POST' = 'POST';
@@ -868,8 +897,9 @@ class WalletService {
             .randomBytes(4)
             .toString('hex')}`;
 
+        // ✅ Signature pakai nominal transfer (bukan total)
         const sigData = {
-            amount: inq.amount,
+            amount: nominalTransfer,
             accountnumber: inq.account_number,
             bankcode: inq.bank_code,
             partnerreff: partnerReffPay,
@@ -880,12 +910,13 @@ class WalletService {
             .update(JSON.stringify(sigData))
             .digest('hex');
 
+        // ✅ Payload LinkQu: amount = nominal (yang dikirim ke rekening)
         const payload = {
             username: LINKQU_CONFIG.username,
             pin: LINKQU_CONFIG.pin,
             bankcode: inq.bank_code,
             accountnumber: inq.account_number,
-            amount: inq.amount,
+            amount: nominalTransfer,        // ⬅️ nominal Rp10.000
             partner_reff: partnerReffPay,
             inquiry_reff: inquiryReff,
             signature,
@@ -935,11 +966,11 @@ class WalletService {
                 .eq('inquiry_reff', inquiryReff);
 
             // ═══════════════════════════════════════════════════════════
-            // UPDATE WALLET (potong saldo)
+            // ✅ UPDATE WALLET: potong saldo sebesar TOTAL (nominal + fee)
             // ═══════════════════════════════════════════════════════════
             if (role === 'driver') {
                 const driverWallet = await this.getWallet(userId, 'driver');
-                const newBalance = driverWallet.balance - inq.amount;
+                const newBalance = driverWallet.balance - totalDeduction; // ⬅️ Rp12.500
 
                 await supabaseAdmin
                     .from('driver_wallets')
@@ -949,16 +980,25 @@ class WalletService {
                 await supabaseAdmin.from('driver_wallet_ledger').insert({
                     driver_id: userId,
                     entry_type: 'withdraw',
-                    amount: inq.amount,
+                    amount: totalDeduction,        // ⬅️ total Rp12.500
                     direction: 'out',
                     balance_after: newBalance,
                     cash_debt_after: driverWallet.cash_debt,
-                    description: `Withdraw ke ${inq.bank_code} ${inq.account_number}`,
-                    metadata: { partner_reff: partnerReffPay },
+                    description: `Withdraw Rp${nominalTransfer.toLocaleString(
+                        'id-ID'
+                    )} ke ${inq.bank_code} ${inq.account_number} + fee Rp${feeAdmin.toLocaleString(
+                        'id-ID'
+                    )}`,
+                    metadata: {
+                        partner_reff: partnerReffPay,
+                        nominal: nominalTransfer,
+                        fee_admin: feeAdmin,
+                        total_deduction: totalDeduction,
+                    },
                 });
             } else {
                 const customerWallet = await this.getWallet(userId, 'customer');
-                const newBalance = customerWallet.balance - inq.amount;
+                const newBalance = customerWallet.balance - totalDeduction; // ⬅️ Rp12.500
 
                 await supabaseAdmin
                     .from('wallets')
@@ -968,10 +1008,14 @@ class WalletService {
                 await supabaseAdmin.from('wallet_transactions').insert({
                     user_id: userId,
                     type: 'withdraw',
-                    amount: inq.amount,
+                    amount: totalDeduction,        // ⬅️ total Rp12.500
                     balance_after: newBalance,
                     reference_id: partnerReffPay,
-                    description: `Withdraw ke ${inq.bank_code} ${inq.account_number}`,
+                    description: `Withdraw Rp${nominalTransfer.toLocaleString(
+                        'id-ID'
+                    )} ke ${inq.bank_code} ${inq.account_number} + fee Rp${feeAdmin.toLocaleString(
+                        'id-ID'
+                    )}`,
                 });
             }
 
@@ -984,12 +1028,16 @@ class WalletService {
                 if (finalStatus === 'SUCCESS') {
                     await notificationService.sendToUser(userId, {
                         title: 'Penarikan Berhasil',
-                        body: `Penarikan Rp${Number(inq.amount).toLocaleString(
-                            'id-ID'
-                        )} ke ${inq.bank_code} ${inq.account_number} berhasil.`,
+                        body:
+                            `Penarikan Rp${nominalTransfer.toLocaleString('id-ID')} ` +
+                            `ke ${inq.bank_code} ${inq.account_number} berhasil. ` +
+                            `Fee admin Rp${feeAdmin.toLocaleString('id-ID')}. ` +
+                            `Total dipotong Rp${totalDeduction.toLocaleString('id-ID')}.`,
                         data: {
                             type: 'withdraw_success',
-                            amount: Number(inq.amount),
+                            amount: nominalTransfer,
+                            fee_admin: feeAdmin,
+                            total_deduction: totalDeduction,
                             inquiry_reff: inquiryReff,
                             partner_reff: partnerReffPay,
                         },
@@ -998,17 +1046,22 @@ class WalletService {
                     logger.info('✅ Withdraw SUCCESS notif sent (execute)', {
                         inquiry_reff: inquiryReff,
                         userId,
-                        amount: inq.amount,
+                        nominalTransfer,
+                        feeAdmin,
+                        totalDeduction,
                     });
                 } else {
                     await notificationService.sendToUser(userId, {
                         title: 'Penarikan Diproses',
-                        body: `Penarikan Rp${Number(inq.amount).toLocaleString(
-                            'id-ID'
-                        )} ke ${inq.bank_code} ${inq.account_number} sedang diproses.`,
+                        body:
+                            `Penarikan Rp${nominalTransfer.toLocaleString('id-ID')} ` +
+                            `ke ${inq.bank_code} ${inq.account_number} sedang diproses. ` +
+                            `Fee admin Rp${feeAdmin.toLocaleString('id-ID')}.`,
                         data: {
                             type: 'withdraw_pending',
-                            amount: Number(inq.amount),
+                            amount: nominalTransfer,
+                            fee_admin: feeAdmin,
+                            total_deduction: totalDeduction,
                             inquiry_reff: inquiryReff,
                             partner_reff: partnerReffPay,
                         },
@@ -1017,7 +1070,9 @@ class WalletService {
                     logger.info('⏳ Withdraw PENDING notif sent (execute)', {
                         inquiry_reff: inquiryReff,
                         userId,
-                        amount: inq.amount,
+                        nominalTransfer,
+                        feeAdmin,
+                        totalDeduction,
                     });
                 }
             } catch (err: any) {
@@ -1031,6 +1086,9 @@ class WalletService {
                 ...response.data,
                 internal_status: finalStatus,
                 partner_reff: partnerReffPay,
+                amount: nominalTransfer,
+                fee_admin: feeAdmin,
+                total_deduction: totalDeduction,
             };
         } catch (err: any) {
             logger.error('Withdraw execute error', {
