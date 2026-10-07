@@ -21,16 +21,21 @@ import { logger } from '../../config/logger';
 
 type UserRole = 'customer' | 'driver' | 'merchant';
 
+// Nama file suara di app (ekstensi .mp3 ikut ditulis, underscore bukan tanda hubung):
+// - customer: assets/sounds/customer.mp3
+// - driver:   assets/sounds/driver_order.mp3
+// - merchant: assets/sounds/merchant_order.mp3
+
 const CHANNEL_MAP: Record<UserRole, string> = {
-    customer: 'customer-notif-v1',
+    customer: 'customer-notif-v2',      // sebelumnya v1
     driver: 'driver-orders-v4',
     merchant: 'merchant-orders-v1',
 };
 
 const SOUND_MAP: Record<UserRole, string> = {
-    customer: 'customer',           // tanpa .mp3
+    customer: 'customer.mp3',           // sebelumnya 'customer'
     driver: 'driver_order.mp3',
-    merchant: 'merchant-order',     // tanpa .mp3
+    merchant: 'merchant-order',         // lihat catatan di bawah
 };
 
 // Fallback kalau role tidak dikenal
