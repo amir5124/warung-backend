@@ -118,6 +118,7 @@ export const orderService = {
             customerId,
             type: input.type,
             tariffCode: input.tariff_code,
+            paymentMethod: input.payment_method,
         });
 
         let delivery_fee = 0;
@@ -196,6 +197,36 @@ export const orderService = {
         const total_fare = subtotal + delivery_fee + packaging_fee;
 
         // ═══════════════════════════════════════════════════════════
+        // ✅ VALIDASI PAYMENT METHOD
+        // ═══════════════════════════════════════════════════════════
+        const paymentMethod = input.payment_method ?? 'cash';
+
+        // Validasi bank_code untuk VA
+        if (paymentMethod === 'bank_transfer' && !input.bank_code) {
+            throw ApiError.badRequest(
+                'bank_code wajib diisi untuk metode transfer bank'
+            );
+        }
+
+        // Validasi saldo cukup untuk wallet
+        if (paymentMethod === 'wallet') {
+            const { data: customerWallet } = await supabaseAdmin
+                .from('wallets')
+                .select('balance')
+                .eq('user_id', customerId)
+                .maybeSingle();
+
+            const balance = Number(customerWallet?.balance ?? 0);
+            if (balance < total_fare) {
+                throw ApiError.badRequest(
+                    `Saldo tidak cukup. Butuh Rp${total_fare.toLocaleString(
+                        'id-ID'
+                    )}, saldo: Rp${balance.toLocaleString('id-ID')}`
+                );
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
         // GENERATE SEND CODE
         // ═══════════════════════════════════════════════════════════
         let sendCode: string | null = null;
@@ -208,8 +239,7 @@ export const orderService = {
                     error: codeErr.message,
                 });
                 sendCode =
-                    'WS' +
-                    Math.random().toString(36).slice(2, 10).toUpperCase();
+                    'WS' + Math.random().toString(36).slice(2, 10).toUpperCase();
             } else {
                 sendCode = codeData as string;
             }
@@ -242,7 +272,8 @@ export const orderService = {
                 driver_earning,
                 merchant_earning: subtotal,
                 platform_earning,
-                payment_method: input.payment_method,
+                payment_method: paymentMethod,       // ✅ dinamis
+                payment_status: 'pending',           // ✅ default
                 notes: input.notes,
                 receiver_name: input.receiver_name,
                 receiver_phone: input.receiver_phone,
@@ -277,6 +308,7 @@ export const orderService = {
             type: order.type,
             tariff_code: order.tariff_code,
             delivery_fee: order.delivery_fee,
+            payment_method: paymentMethod,
             send_code: order.send_code,
         });
 
@@ -307,6 +339,163 @@ export const orderService = {
         }
 
         // ═══════════════════════════════════════════════════════════
+        // ✅ HANDLE PAYMENT
+        // ═══════════════════════════════════════════════════════════
+        let paymentMeta: {
+            status: string;
+            reference?: string;
+            url?: string;
+            expires_at?: string;
+        } = { status: 'pending' };
+
+        // ─────────────────────────────────────────────────────────
+        // 1. CASH: bayar ke driver
+        // ─────────────────────────────────────────────────────────
+        if (paymentMethod === 'cash') {
+            logger.info('[order.create] Payment: CASH', {
+                orderId: order.id,
+                amount: total_fare,
+            });
+            paymentMeta = { status: 'pending' };
+            // tidak ada aksi — driver terima cash saat trip selesai
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // 2. WALLET: potong saldo customer
+        // ─────────────────────────────────────────────────────────
+        else if (paymentMethod === 'wallet') {
+            logger.info('[order.create] Payment: WALLET', {
+                orderId: order.id,
+                customerId,
+                amount: total_fare,
+            });
+
+            try {
+                const { walletService } = await import(
+                    '../wallet/wallet.service'
+                );
+
+                const result = await walletService.payWithWallet(
+                    customerId,
+                    order.id,
+                    total_fare
+                );
+
+                paymentMeta = {
+                    status: 'paid',
+                    reference: `WALLET-${order.id}`,
+                };
+
+                await supabaseAdmin
+                    .from('orders')
+                    .update({
+                        payment_status: 'paid',
+                        paid_at: new Date().toISOString(),
+                        payment_reference: `WALLET-${order.id}`,
+                    })
+                    .eq('id', order.id);
+
+                logger.info('[order.create] ✅ Wallet paid', {
+                    orderId: order.id,
+                    amount: total_fare,
+                    newBalance: result.new_balance,
+                });
+            } catch (err: any) {
+                logger.error('[order.create] ❌ Wallet payment gagal', {
+                    orderId: order.id,
+                    error: err.message,
+                });
+
+                // Rollback: cancel order
+                await supabaseAdmin
+                    .from('orders')
+                    .update({
+                        status: 'cancelled',
+                        cancelled_at: new Date().toISOString(),
+                        cancellation_reason: `Payment wallet gagal: ${err.message}`,
+                    })
+                    .eq('id', order.id);
+
+                throw ApiError.internal(
+                    'Gagal potong saldo: ' + err.message
+                );
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // 3. QRIS / VA: generate payment link via LinkQu
+        // ─────────────────────────────────────────────────────────
+        else if (
+            paymentMethod === 'qris' ||
+            paymentMethod === 'bank_transfer'
+        ) {
+            logger.info('[order.create] Payment: LINKQU', {
+                orderId: order.id,
+                method: paymentMethod,
+                amount: total_fare,
+                bankCode: input.bank_code,
+            });
+
+            try {
+                const { walletService } = await import(
+                    '../wallet/wallet.service'
+                );
+
+                const payment = await walletService.createOrderPayment({
+                    orderId: order.id,
+                    userId: customerId,
+                    amount: total_fare,
+                    method: paymentMethod === 'qris' ? 'qris' : 'va',
+                    bankCode: input.bank_code,
+                });
+
+                paymentMeta = {
+                    status: 'pending',
+                    reference: payment.partner_reff,
+                    url: payment.qr_url ?? payment.va_number,
+                    expires_at: payment.expired_at,
+                };
+
+                await supabaseAdmin
+                    .from('orders')
+                    .update({
+                        payment_status: 'pending',
+                        payment_reference: payment.partner_reff,
+                        payment_url: payment.qr_url ?? payment.va_number,
+                        payment_expired_at: payment.expired_at,
+                    })
+                    .eq('id', order.id);
+
+                logger.info('[order.create] ✅ Payment link created', {
+                    orderId: order.id,
+                    method: paymentMethod,
+                    reference: payment.partner_reff,
+                });
+
+                return await orderService.getById(order.id, customerId, 'customer');
+            } catch (err: any) {
+                logger.error('[order.create] ❌ Payment link gagal', {
+                    orderId: order.id,
+                    error: err.message,
+                });
+
+                // Rollback: cancel order
+                await supabaseAdmin
+                    .from('orders')
+                    .update({
+                        status: 'cancelled',
+                        cancelled_at: new Date().toISOString(),
+                        cancellation_reason: `Payment link gagal: ${err.message}`,
+                    })
+                    .eq('id', order.id);
+
+                throw ApiError.internal(
+                    'Gagal buat payment: ' + err.message
+                );
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
         // MATCHING DRIVER
         // ═══════════════════════════════════════════════════════════
         logger.info('[order.create] Mencari driver...', {
@@ -328,7 +517,7 @@ export const orderService = {
         });
 
         // ═══════════════════════════════════════════════════════════
-        // ✅ AUTO BID — coba autobid order ke driver eligible
+        // ✅ AUTO BID
         // ═══════════════════════════════════════════════════════════
         let autobidDriver: string | null = null;
 
@@ -354,9 +543,7 @@ export const orderService = {
                 } else {
                     logger.info(
                         '[order.create] Autobid tidak ada yang eligible',
-                        {
-                            orderId: order.id,
-                        }
+                        { orderId: order.id }
                     );
                 }
             } catch (err: any) {
@@ -421,15 +608,17 @@ export const orderService = {
             total_fare: String(order.total_fare ?? 0),
             subtotal: String(order.subtotal ?? 0),
             payment_method: order.payment_method ?? 'cash',
+            payment_status: paymentMeta.status,           // ✅
+            payment_reference: paymentMeta.reference ?? null, // ✅
+            payment_url: paymentMeta.url ?? null,         // ✅
+            payment_expires_at: paymentMeta.expires_at ?? null, // ✅
             tariff_code: order.tariff_code ?? '',
             option_name: order.option_name ?? '',
             customer_name: custProfile?.full_name ?? 'Customer',
             customer_avatar: custProfile?.avatar_url ?? '',
 
-            // ✅ Items untuk food
             items: itemsForNotif,
 
-            // ✅ Untuk send
             receiver_name: order.receiver_name ?? '',
             receiver_phone: order.receiver_phone ?? '',
             sender_name: order.sender_name ?? '',
@@ -443,7 +632,7 @@ export const orderService = {
         // NOTIFIKASI
         // ═══════════════════════════════════════════════════════════
         if (autobidDriver) {
-            // ── Autobid berhasil: notif ke driver tunggal ──
+            // ── Autobid berhasil ──
             try {
                 await notificationService.sendToUser(autobidDriver, {
                     title: '🚀 Kamu dapat order baru (Autobid)',
@@ -486,7 +675,7 @@ export const orderService = {
                 });
             }
         } else {
-            // ── Normal flow: notif ke semua driver ──
+            // ── Normal flow ──
             for (const d of drivers) {
                 try {
                     await notificationService.sendToUser(d.user_id, {
@@ -512,7 +701,7 @@ export const orderService = {
                 }
             }
 
-            // ── Notif ke customer kalau tidak ada driver ──
+            // Notif ke customer kalau tidak ada driver
             if (drivers.length === 0) {
                 try {
                     await notificationService.sendToUser(customerId, {
@@ -527,18 +716,52 @@ export const orderService = {
                 } catch (err: any) {
                     logger.warn(
                         '[order.create] Gagal kirim notif ke customer',
-                        {
-                            customerId,
-                            err: err.message,
-                        }
+                        { customerId, err: err.message }
                     );
                 }
             }
         }
 
+        // ═══════════════════════════════════════════════════════════
+        // ✅ NOTIF khusus untuk QRIS/VA — kirim ke customer
+        // ═══════════════════════════════════════════════════════════
+        if (
+            (paymentMethod === 'qris' || paymentMethod === 'bank_transfer') &&
+            paymentMeta.reference
+        ) {
+            try {
+                const isQris = paymentMethod === 'qris';
+                await notificationService.sendToUser(customerId, {
+                    title: isQris
+                        ? '📱 Scan QRIS untuk bayar'
+                        : '🏦 Transfer VA untuk bayar',
+                    body: isQris
+                        ? `Scan QRIS Rp${total_fare.toLocaleString(
+                            'id-ID'
+                        )} dalam 30 menit untuk memproses order.`
+                        : `Transfer VA Rp${total_fare.toLocaleString(
+                            'id-ID'
+                        )} dalam 30 menit untuk memproses order.`,
+                    data: {
+                        order_id: order.id,
+                        type: 'payment_pending',
+                        method: paymentMethod,
+                        amount: total_fare,
+                        reference: paymentMeta.reference,
+                        url: paymentMeta.url,
+                        expires_at: paymentMeta.expires_at,
+                    },
+                });
+            } catch (err: any) {
+                logger.warn('[order.create] Gagal notif payment', {
+                    customerId,
+                    err: err.message,
+                });
+            }
+        }
+
         return await orderService.getById(order.id, customerId, 'customer');
     },
-
     // ============================================================
     // ACCEPT ORDER (driver)
     // ============================================================
@@ -692,6 +915,257 @@ export const orderService = {
         }
 
         return data;
+    },
+
+
+    /**
+     * Trigger matching driver setelah payment paid (QRIS/VA).
+     * Dipanggil dari wallet.callback.ts saat payment SUCCESS.
+     */
+    async triggerMatchingAfterPayment(orderId: number) {
+        logger.info('[order.triggerMatching] START', { orderId });
+
+        // 1. Ambil order
+        const { data: order } = await supabaseAdmin
+            .from('orders')
+            .select('*')
+            .eq('id', orderId)
+            .single();
+
+        if (!order) {
+            logger.warn('[order.triggerMatching] Order tidak ditemukan', {
+                orderId,
+            });
+            return;
+        }
+
+        // Guard: hanya proses order pending
+        if (order.status !== 'pending') {
+            logger.warn('[order.triggerMatching] Order tidak pending, skip', {
+                orderId,
+                status: order.status,
+            });
+            return;
+        }
+
+        // Guard: cek payment sudah paid
+        if (order.payment_status !== 'paid') {
+            logger.warn(
+                '[order.triggerMatching] Payment belum paid, skip',
+                {
+                    orderId,
+                    paymentStatus: order.payment_status,
+                }
+            );
+            return;
+        }
+
+        // 2. Ambil pickup coords
+        const pickupCoords = parseLocation(order.pickup_location);
+        if (!pickupCoords) {
+            logger.error('[order.triggerMatching] Pickup coords invalid', {
+                orderId,
+            });
+            return;
+        }
+
+        // 3. Matching driver
+        const drivers = await matchingService.findDriversForOrder(
+            order.id,
+            pickupCoords.latitude,
+            pickupCoords.longitude,
+            order.type,
+            order.tariff_code
+        );
+
+        logger.info('[order.triggerMatching] Driver ditemukan', {
+            orderId,
+            driverCount: drivers.length,
+        });
+
+        if (drivers.length === 0) {
+            logger.warn('[order.triggerMatching] Tidak ada driver', {
+                orderId,
+            });
+            return;
+        }
+
+        // 4. Autobid
+        let autobidDriver: string | null = null;
+        try {
+            const { autobidService } = await import('./autobid.service');
+            autobidDriver = await autobidService.tryAutoBid(
+                order.id,
+                {
+                    type: order.type,
+                    driver_earning: Number(order.driver_earning),
+                    distance_km: Number(order.distance_km),
+                },
+                drivers.map((d) => d.user_id)
+            );
+
+            if (autobidDriver) {
+                logger.info('[order.triggerMatching] ✅ Autobid sukses', {
+                    orderId,
+                    driverId: autobidDriver,
+                });
+            }
+        } catch (err: any) {
+            logger.warn('[order.triggerMatching] Autobid error', {
+                orderId,
+                error: err.message,
+            });
+        }
+
+        // 5. Ambil customer profile untuk notif
+        const { data: custProfile } = await supabaseAdmin
+            .from('profiles')
+            .select('full_name, avatar_url')
+            .eq('id', order.customer_id)
+            .maybeSingle();
+
+        const pickupShort = prettyPlace(order.pickup_name);
+        const dropoffShort = prettyPlace(order.dropoff_name);
+        const jarakText =
+            Number(order.distance_km) < 1
+                ? `${Math.round(Number(order.distance_km) * 1000)} m`
+                : `${Number(order.distance_km).toFixed(1)} km`;
+        const fareText = `Rp${Number(order.delivery_fee).toLocaleString(
+            'id-ID'
+        )}`;
+
+        // 6. Build payload notif
+        let itemsForNotif: any[] = [];
+        if (order.type === 'food') {
+            const { data: orderItems } = await supabaseAdmin
+                .from('order_items')
+                .select('menu_item_id, name, variant, qty, price')
+                .eq('order_id', order.id);
+            itemsForNotif = orderItems ?? [];
+        }
+
+        const orderPayloadForNotif = {
+            id: String(order.id),
+            order_code: order.order_code,
+            type: order.type,
+            status: order.status,
+            pickup_name: order.pickup_name ?? '',
+            pickup_address: order.pickup_address ?? '',
+            pickup_coords: pickupCoords,
+            dropoff_name: order.dropoff_name ?? '',
+            dropoff_address: order.dropoff_address ?? '',
+            dropoff_coords: parseLocation(order.dropoff_location),
+            distance_km: String(order.distance_km ?? 0),
+            duration_min: String(order.duration_min ?? 0),
+            delivery_fee: String(order.delivery_fee ?? 0),
+            driver_earning: String(order.driver_earning ?? 0),
+            total_fare: String(order.total_fare ?? 0),
+            subtotal: String(order.subtotal ?? 0),
+            payment_method: order.payment_method ?? 'cash',
+            payment_status: 'paid',
+            payment_reference: order.payment_reference ?? null,
+            tariff_code: order.tariff_code ?? '',
+            option_name: order.option_name ?? '',
+            customer_name: custProfile?.full_name ?? 'Customer',
+            customer_avatar: custProfile?.avatar_url ?? '',
+            items: itemsForNotif,
+            receiver_name: order.receiver_name ?? '',
+            receiver_phone: order.receiver_phone ?? '',
+            sender_name: order.sender_name ?? '',
+            sender_phone: order.sender_phone ?? '',
+            package_type: order.package_type ?? '',
+            package_size: order.package_size ?? '',
+            package_weight: order.package_weight ?? '',
+        };
+
+        // 7. Notif driver
+        if (autobidDriver) {
+            // Autobid berhasil
+            try {
+                await notificationService.sendToUser(autobidDriver, {
+                    title: '🚀 Kamu dapat order baru (Autobid)',
+                    body: `${pickupShort} → ${dropoffShort} · ${jarakText} · ${fareText}`,
+                    data: {
+                        order_id: String(order.id),
+                        type: 'autobid_accepted',
+                        tariff_code: order.tariff_code ?? '',
+                        service: order.type,
+                        order: JSON.stringify(orderPayloadForNotif),
+                    },
+                });
+                logger.info(
+                    '[order.triggerMatching] Notif autobid terkirim',
+                    {
+                        orderId,
+                        driverId: autobidDriver,
+                    }
+                );
+            } catch (err: any) {
+                logger.warn(
+                    '[order.triggerMatching] Gagal notif autobid',
+                    {
+                        orderId,
+                        err: err.message,
+                    }
+                );
+            }
+
+            // Notif ke customer
+            try {
+                await notificationService.sendToUser(order.customer_id, {
+                    title: 'Drivermu sudah dapat! 🎉',
+                    body: 'Driver sedang menuju ke lokasimu.',
+                    data: {
+                        order_id: order.id,
+                        type: 'driver_accepted',
+                        service: order.type,
+                    },
+                });
+            } catch (err: any) {
+                logger.warn(
+                    '[order.triggerMatching] Gagal notif customer',
+                    {
+                        orderId,
+                        err: err.message,
+                    }
+                );
+            }
+        } else {
+            // Normal flow
+            for (const d of drivers) {
+                try {
+                    await notificationService.sendToUser(d.user_id, {
+                        title: 'Orderan baru masuk 🚀',
+                        body: `${pickupShort} → ${dropoffShort} · ${jarakText} · ${fareText}`,
+                        data: {
+                            order_id: String(order.id),
+                            type: 'new_order',
+                            tariff_code: order.tariff_code ?? '',
+                            service: order.type,
+                            order: JSON.stringify(orderPayloadForNotif),
+                        },
+                    });
+                    logger.info(
+                        '[order.triggerMatching] Notif driver terkirim',
+                        {
+                            orderId,
+                            driverId: d.user_id,
+                        }
+                    );
+                } catch (err: any) {
+                    logger.warn(
+                        '[order.triggerMatching] Gagal notif driver',
+                        {
+                            orderId,
+                            driverId: d.user_id,
+                            err: err.message,
+                        }
+                    );
+                }
+            }
+        }
+
+        logger.info('[order.triggerMatching] ✅ DONE', { orderId });
     },
 
     // ============================================================
