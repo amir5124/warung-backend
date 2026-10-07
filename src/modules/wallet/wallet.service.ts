@@ -1119,7 +1119,8 @@ class WalletService {
         const customerEmail = profile?.email ?? 'noreply@warung.id';
 
         const partnerReff = `ORDER-${input.orderId}-${Date.now()}`;
-        const expired = this.generateExpiredTimestamp(30); // 30 menit
+        // wallet.service.ts — createOrderPayment
+        const expired = this.generateExpiredTimestamp(15); // ⬅️ dari 30 → 15
 
         let endpoint = '';
         let payload: any = {};
