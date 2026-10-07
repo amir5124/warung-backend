@@ -694,21 +694,21 @@ class WalletService {
 
             console.log('✅ [LINKQU PARSED]', JSON.stringify(data, null, 2));
 
-            const statusFromLinkqu = data?.status;
-            if (
-                statusFromLinkqu === 'SUCCESS' ||
-                statusFromLinkqu === 'SETTLED' ||
-                statusFromLinkqu === 'PAID'
-            ) {
-                await supabaseAdmin
-                    .from('wallet_topups')
-                    .update({
-                        status: 'SUCCESS',
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq('partner_reff', partnerReff);
-                console.log('✅ [DB] Topup ditandai SUCCESS');
-            }
+            // const statusFromLinkqu = data?.status;
+            // if (
+            //     statusFromLinkqu === 'SUCCESS' ||
+            //     statusFromLinkqu === 'SETTLED' ||
+            //     statusFromLinkqu === 'PAID'
+            // ) {
+            //     await supabaseAdmin
+            //         .from('wallet_topups')
+            //         .update({
+            //             status: 'SUCCESS',
+            //             updated_at: new Date().toISOString(),
+            //         })
+            //         .eq('partner_reff', partnerReff);
+            //     console.log('✅ [DB] Topup ditandai SUCCESS');
+            // }
 
             return data;
         } catch (err: any) {
