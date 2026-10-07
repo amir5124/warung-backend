@@ -1097,6 +1097,179 @@ class WalletService {
             throw ApiError.internal('Gagal memproses withdraw');
         }
     }
+
+    // Di wallet.service.ts
+    async createOrderPayment(input: {
+        orderId: number;
+        userId: string;
+        amount: number;
+        method: 'qris' | 'va';
+        bankCode?: string;
+    }) {
+        logger.info('[wallet.createOrderPayment] START', input);
+
+        // 1. Ambil profile
+        const { data: profile } = await supabaseAdmin
+            .from('profiles')
+            .select('full_name, email')
+            .eq('id', input.userId)
+            .single();
+
+        const customerName = profile?.full_name ?? 'Customer';
+        const customerEmail = profile?.email ?? 'noreply@warung.id';
+
+        const partnerReff = `ORDER-${input.orderId}-${Date.now()}`;
+        const expired = this.generateExpiredTimestamp(30); // 30 menit
+
+        let endpoint = '';
+        let payload: any = {};
+
+        if (input.method === 'qris') {
+            endpoint = '/transaction/create/qris';
+            const signature = this.signQris({
+                amount: input.amount,
+                expired,
+                partner_reff: partnerReff,
+                customer_id: input.userId,
+                customer_name: customerName,
+                customer_email: customerEmail,
+            });
+            payload = {
+                username: LINKQU_CONFIG.username,
+                pin: LINKQU_CONFIG.pin,
+                amount: input.amount,
+                partner_reff: partnerReff,
+                expired,
+                signature,
+                url_callback: 'https://warung.siappgo.id/api/wallet/callback',
+                customer_id: input.userId,
+                customer_name: customerName,
+                customer_email: customerEmail,
+            };
+        } else {
+            if (!input.bankCode) throw ApiError.badRequest('bank_code wajib');
+            endpoint = '/transaction/create/va';
+            const realBankCode =
+                BANK_MAPPING[input.bankCode.toUpperCase()] || input.bankCode;
+            const signature = this.signVa({
+                amount: input.amount,
+                expired,
+                bank_code: realBankCode,
+                partner_reff: partnerReff,
+                customer_id: input.userId,
+                customer_name: customerName,
+                customer_email: customerEmail,
+            });
+            payload = {
+                username: LINKQU_CONFIG.username,
+                pin: LINKQU_CONFIG.pin,
+                amount: input.amount,
+                bank_code: realBankCode,
+                partner_reff: partnerReff,
+                expired,
+                signature,
+                url_callback: 'https://warung.siappgo.id/api/wallet/callback',
+                customer_id: input.userId,
+                customer_name: customerName,
+                customer_email: customerEmail,
+            };
+        }
+
+        // 2. Request ke LinkQu
+        const url = `${LINKQU_CONFIG.baseUrl}${endpoint}`;
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'client-id': LINKQU_CONFIG.clientId,
+                'client-secret': LINKQU_CONFIG.clientSecret,
+                'Content-Type': 'text/plain',
+                'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                Accept: 'application/json, text/plain, */*',
+            },
+            body: JSON.stringify(payload),
+        });
+
+        const rawText = await response.text();
+        let data: any;
+        try {
+            data = JSON.parse(rawText);
+        } catch {
+            throw ApiError.internal('Response LinkQu tidak valid');
+        }
+
+        if (!response.ok) {
+            throw ApiError.internal(`LinkQu error ${response.status}`);
+        }
+
+        // 3. Simpan ke DB
+        await supabaseAdmin.from('order_payments').insert({
+            order_id: input.orderId,
+            user_id: input.userId,
+            partner_reff: partnerReff,
+            method: input.method,
+            amount: input.amount,
+            bank_code: input.bankCode ?? null,
+            va_number: data?.virtual_account ?? null,
+            qr_url: data?.imageqris ?? null,
+            status: 'PENDING',
+            raw_response: data,
+            expired_at: this.parseExpiredToDate(expired),
+        });
+
+        return {
+            ...data,
+            partner_reff: partnerReff,
+            va_number: data?.virtual_account ?? null,
+            qr_url: data?.imageqris ?? null,
+            expired_at: this.parseExpiredToDate(expired),
+        };
+    }
+
+    // Di wallet.service.ts
+    async payWithWallet(userId: string, orderId: number, amount: number) {
+        logger.info('[wallet.payWithWallet] START', { userId, orderId, amount });
+
+        // 1. Cek saldo
+        const wallet = await this.getWallet(userId, 'customer');
+        if (wallet.balance < amount) {
+            throw ApiError.badRequest(
+                `Saldo tidak cukup. Butuh Rp${amount.toLocaleString('id-ID')}, ` +
+                `saldo: Rp${wallet.balance.toLocaleString('id-ID')}`
+            );
+        }
+
+        // 2. Potong saldo (race-safe)
+        const newBalance = wallet.balance - amount;
+
+        const { error: updateErr } = await supabaseAdmin
+            .from('wallets')
+            .update({ balance: newBalance, updated_at: new Date().toISOString() })
+            .eq('user_id', userId);
+
+        if (updateErr) {
+            throw ApiError.internal('Gagal potong saldo: ' + updateErr.message);
+        }
+
+        // 3. Insert transaksi
+        await supabaseAdmin.from('wallet_transactions').insert({
+            user_id: userId,
+            type: 'order_payment',
+            amount,
+            balance_after: newBalance,
+            reference_id: `ORDER-${orderId}`,
+            description: `Pembayaran order #${orderId}`,
+        });
+
+        logger.info('[wallet.payWithWallet] ✅ Sukses', {
+            userId,
+            orderId,
+            amount,
+            newBalance,
+        });
+
+        return { new_balance: newBalance, amount };
+    }
     // ============================================================
     // SAVED ACCOUNTS
     // ============================================================

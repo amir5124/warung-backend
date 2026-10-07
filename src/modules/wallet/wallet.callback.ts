@@ -13,7 +13,11 @@ const FEE_ADMIN_VA = 2500;
 const FEE_ADMIN_BCA = 4000;
 const FEE_ADMIN_QRIS_PERCENT = 0.008;
 
-function calculateAdminFee(method: string, bankCode: string | null, amount: number): number {
+function calculateAdminFee(
+    method: string,
+    bankCode: string | null,
+    amount: number
+): number {
     const m = (method ?? '').toLowerCase();
     if (m === 'qris') return Math.round(amount * FEE_ADMIN_QRIS_PERCENT);
     if (bankCode === '014') return FEE_ADMIN_BCA;
@@ -27,11 +31,18 @@ router.post('/callback', async (req: Request, res: Response) => {
     const body = req.body ?? {};
     const { partner_reff, status, va_code, serialnumber } = body;
 
-    logger.info('📥 [LinkQu Callback]', { partner_reff, status, va_code });
+    logger.info('📥 [LinkQu Callback]', {
+        partner_reff,
+        status,
+        va_code,
+    });
 
     if (!partner_reff) return res.status(200).send('OK');
 
     try {
+        // ═══════════════════════════════════════════════════════
+        // 1. Cek TOPUP
+        // ═══════════════════════════════════════════════════════
         const { data: topup } = await supabaseAdmin
             .from('wallet_topups')
             .select('*')
@@ -39,25 +50,66 @@ router.post('/callback', async (req: Request, res: Response) => {
             .maybeSingle();
 
         if (topup) {
-            await handleTopupCallback(topup, status, va_code, serialnumber);
-            return res.status(200).json({ status: 'SUCCESS', message: 'Topup diproses' });
+            await handleTopupCallback(
+                topup,
+                status,
+                va_code,
+                serialnumber
+            );
+            return res
+                .status(200)
+                .json({ status: 'SUCCESS', message: 'Topup diproses' });
         }
 
+        // ═══════════════════════════════════════════════════════
+        // 2. Cek WITHDRAWAL
+        // ═══════════════════════════════════════════════════════
         const { data: wd } = await supabaseAdmin
             .from('wallet_withdrawals')
             .select('*')
-            .or(`partner_reff.eq.${partner_reff},partner_reff_pay.eq.${partner_reff}`)
+            .or(
+                `partner_reff.eq.${partner_reff},partner_reff_pay.eq.${partner_reff}`
+            )
             .maybeSingle();
 
         if (wd) {
             await handleWithdrawCallback(wd, status);
-            return res.status(200).json({ status: 'SUCCESS', message: 'Withdraw diproses' });
+            return res
+                .status(200)
+                .json({ status: 'SUCCESS', message: 'Withdraw diproses' });
         }
 
-        logger.warn('⚠️ Callback: partner_reff tidak dikenal', { partner_reff });
+        // ═══════════════════════════════════════════════════════
+        // 3. ✅ BARU: Cek ORDER PAYMENT (QRIS/VA untuk order)
+        // ═══════════════════════════════════════════════════════
+        const { data: orderPayment } = await supabaseAdmin
+            .from('order_payments')
+            .select('*')
+            .eq('partner_reff', partner_reff)
+            .maybeSingle();
+
+        if (orderPayment) {
+            await handleOrderPaymentCallback(orderPayment, status);
+            return res
+                .status(200)
+                .json({
+                    status: 'SUCCESS',
+                    message: 'Order payment diproses',
+                });
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // 4. Tidak dikenal
+        // ═══════════════════════════════════════════════════════
+        logger.warn('⚠️ Callback: partner_reff tidak dikenal', {
+            partner_reff,
+        });
         return res.status(200).send('OK');
     } catch (err: any) {
-        logger.error('❌ Callback error', { error: err.message, partner_reff });
+        logger.error('❌ Callback error', {
+            error: err.message,
+            partner_reff,
+        });
         return res.status(200).send('OK');
     }
 });
@@ -65,8 +117,6 @@ router.post('/callback', async (req: Request, res: Response) => {
 // ============================================================
 // HANDLER: TOPUP CALLBACK
 // ============================================================
-// src/modules/wallet/wallet.callback.ts
-
 async function handleTopupCallback(
     topup: any,
     status: string,
@@ -101,7 +151,9 @@ async function handleTopupCallback(
 
             await notificationService.sendToUser(topup.user_id, {
                 title: 'Topup Gagal',
-                body: `Topup Rp${nominal.toLocaleString('id-ID')} gagal atau kadaluarsa.`,
+                body: `Topup Rp${nominal.toLocaleString(
+                    'id-ID'
+                )} gagal atau kadaluarsa.`,
                 data: {
                     type: 'topup_failed',
                     amount: nominal,
@@ -119,29 +171,23 @@ async function handleTopupCallback(
     // ═══════════════════════════════════════════════════════════
     // HITUNG NOMINAL & FEE
     // ═══════════════════════════════════════════════════════════
-    // Model: FEE DITAMBAHKAN (ditanggung customer)
-    // - totalBayar  = nominal + adminFee (Rp12.500)
-    // - nominal     = yang masuk saldo     (Rp10.000)
-    // - adminFee    = fee admin            (Rp2.500)
-    // ═══════════════════════════════════════════════════════════
     const userId = topup.user_id;
 
-    // ✅ Ambil dari kolom yang disimpan saat create (topupInquiry)
     const nominal = Number(topup.nominal ?? topup.amount);
     const adminFee = Number(topup.admin_fee ?? 0);
     const totalBayar = Number(topup.amount);
 
-    // ✅ Yang masuk saldo = nominal (karena fee ditanggung customer)
+    // ✅ Yang masuk saldo = nominal
     const netAmount = nominal;
 
     logger.info('💰 Fee admin', {
         partner_reff: topup.partner_reff,
         method: topup.method,
         bankCode: topup.bank_code,
-        totalBayar,       // Rp12.500 (dibayar user)
-        nominal,          // Rp10.000 (nominal topup)
-        adminFee,         // Rp2.500 (fee admin)
-        netAmount,        // Rp10.000 (masuk saldo)
+        totalBayar,
+        nominal,
+        adminFee,
+        netAmount,
     });
 
     // ═══════════════════════════════════════════════════════════
@@ -206,20 +252,23 @@ async function handleTopupCallback(
             direction: 'in',
             balance_after: newBalance,
             cash_debt_after: newCashDebt,
-            description: `Topup via ${topup.method?.toUpperCase() ?? 'LinkQu'} (nominal Rp${nominal.toLocaleString('id-ID')} + fee Rp${adminFee.toLocaleString('id-ID')})`,
+            description: `Topup via ${topup.method?.toUpperCase() ?? 'LinkQu'
+                } (nominal Rp${nominal.toLocaleString(
+                    'id-ID'
+                )} + fee Rp${adminFee.toLocaleString('id-ID')})`,
             metadata: {
                 partner_reff: topup.partner_reff,
                 va_code,
                 serialnumber,
                 total_bayar: totalBayar,
-                nominal: nominal,
+                nominal,
                 admin_fee: adminFee,
                 net_amount: netAmount,
                 debt_paid: debtPaid,
             },
         });
 
-        // ── LANGKAH 5: Ledger pelunasan utang (kalau ada) ──
+        // ── LANGKAH 5: Ledger pelunasan utang ──
         if (debtPaid > 0) {
             await supabaseAdmin.from('driver_wallet_ledger').insert({
                 driver_id: userId,
@@ -283,7 +332,10 @@ async function handleTopupCallback(
             amount: netAmount,
             balance_after: newBalance,
             reference_id: topup.partner_reff,
-            description: `Topup via ${topup.method?.toUpperCase() ?? 'LinkQu'} (nominal Rp${nominal.toLocaleString('id-ID')} + fee Rp${adminFee.toLocaleString('id-ID')})`,
+            description: `Topup via ${topup.method?.toUpperCase() ?? 'LinkQu'
+                } (nominal Rp${nominal.toLocaleString(
+                    'id-ID'
+                )} + fee Rp${adminFee.toLocaleString('id-ID')})`,
         });
 
         logger.info('✅ Topup SUCCESS (customer)', {
@@ -313,13 +365,15 @@ async function handleTopupCallback(
     // ═══════════════════════════════════════════════════════════
     await notificationService.sendToUser(userId, {
         title: 'Topup Berhasil',
-        body: `Saldo Rp${netAmount.toLocaleString('id-ID')} sudah masuk (fee admin Rp${adminFee.toLocaleString('id-ID')}).`,
+        body: `Saldo Rp${netAmount.toLocaleString(
+            'id-ID'
+        )} sudah masuk (fee admin Rp${adminFee.toLocaleString('id-ID')}).`,
         data: {
             type: 'topup_success',
-            amount: netAmount,             // nominal yang masuk
-            nominal: nominal,              // nominal topup
-            total_bayar: totalBayar,       // total bayar
-            admin_fee: adminFee,           // fee
+            amount: netAmount,
+            nominal,
+            total_bayar: totalBayar,
+            admin_fee: adminFee,
             partner_reff: topup.partner_reff,
         },
     });
@@ -333,7 +387,7 @@ async function handleWithdrawCallback(wd: any, status: string) {
     const isFailed = status === 'FAILED' || status === 'REJECTED';
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ IDEMPOTENCY: skip HANYA kalau sudah SUCCESS + sudah dinotif
+    // IDEMPOTENCY
     // ═══════════════════════════════════════════════════════════
     if (wd.status === 'SUCCESS' && wd.notified_at) {
         logger.info('ℹ️ Withdraw sudah SUCCESS & dinotif, skip', {
@@ -343,11 +397,11 @@ async function handleWithdrawCallback(wd: any, status: string) {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ HITUNG NOMINAL & FEE
+    // HITUNG NOMINAL & FEE
     // ═══════════════════════════════════════════════════════════
-    const nominal = Number(wd.amount ?? 0);              // Rp10.000
-    const feeAdmin = Number(wd.fee_admin ?? 3000);       // Rp2.500
-    const totalDeduction = nominal + feeAdmin;           // Rp12.500
+    const nominal = Number(wd.amount ?? 0);
+    const feeAdmin = Number(wd.fee_admin ?? 3000);
+    const totalDeduction = nominal + feeAdmin;
 
     // ═══════════════════════════════════════════════════════════
     // HANDLE SUCCESS
@@ -362,7 +416,6 @@ async function handleWithdrawCallback(wd: any, status: string) {
             })
             .eq('id', wd.id);
 
-        // Kirim notif HANYA kalau belum pernah dinotif
         if (!wd.notified_at) {
             await notificationService.sendToUser(wd.user_id, {
                 title: 'Penarikan Berhasil',
@@ -385,16 +438,12 @@ async function handleWithdrawCallback(wd: any, status: string) {
                 feeAdmin,
                 totalDeduction,
             });
-        } else {
-            logger.info('ℹ️ Withdraw SUCCESS, notif sudah pernah dikirim', {
-                inquiry_reff: wd.inquiry_reff,
-            });
         }
         return;
     }
 
     // ═══════════════════════════════════════════════════════════
-    // HANDLE FAILED (+ REFUND TOTAL: nominal + fee)
+    // HANDLE FAILED (+ REFUND TOTAL)
     // ═══════════════════════════════════════════════════════════
     if (isFailed) {
         const userId = wd.user_id;
@@ -414,7 +463,6 @@ async function handleWithdrawCallback(wd: any, status: string) {
                 .eq('driver_id', userId)
                 .single();
 
-            // ✅ Refund TOTAL (nominal + fee)
             const newBalance =
                 Number(wallet?.balance ?? 0) + totalDeduction;
             const cashDebt = Number(wallet?.cash_debt ?? 0);
@@ -427,13 +475,15 @@ async function handleWithdrawCallback(wd: any, status: string) {
             await supabaseAdmin.from('driver_wallet_ledger').insert({
                 driver_id: userId,
                 entry_type: 'adjustment',
-                amount: totalDeduction,           // ⬅️ total Rp12.500
+                amount: totalDeduction,
                 direction: 'in',
                 balance_after: newBalance,
                 cash_debt_after: cashDebt,
                 description:
                     `Refund withdraw gagal #${wd.inquiry_reff} ` +
-                    `(nominal Rp${nominal.toLocaleString('id-ID')} + fee Rp${feeAdmin.toLocaleString('id-ID')})`,
+                    `(nominal Rp${nominal.toLocaleString(
+                        'id-ID'
+                    )} + fee Rp${feeAdmin.toLocaleString('id-ID')})`,
                 metadata: {
                     inquiry_reff: wd.inquiry_reff,
                     nominal,
@@ -448,7 +498,6 @@ async function handleWithdrawCallback(wd: any, status: string) {
                 .eq('user_id', userId)
                 .single();
 
-            // ✅ Refund TOTAL (nominal + fee)
             const newBalance =
                 Number(wallet?.balance ?? 0) + totalDeduction;
 
@@ -460,12 +509,14 @@ async function handleWithdrawCallback(wd: any, status: string) {
             await supabaseAdmin.from('wallet_transactions').insert({
                 user_id: userId,
                 type: 'withdraw_refund',
-                amount: totalDeduction,           // ⬅️ total Rp12.500
+                amount: totalDeduction,
                 balance_after: newBalance,
                 reference_id: wd.inquiry_reff,
                 description:
                     `Refund withdraw gagal ` +
-                    `(nominal Rp${nominal.toLocaleString('id-ID')} + fee Rp${feeAdmin.toLocaleString('id-ID')})`,
+                    `(nominal Rp${nominal.toLocaleString(
+                        'id-ID'
+                    )} + fee Rp${feeAdmin.toLocaleString('id-ID')})`,
             });
         }
 
@@ -482,7 +533,9 @@ async function handleWithdrawCallback(wd: any, status: string) {
             title: 'Penarikan Gagal',
             body:
                 `Penarikan Rp${nominal.toLocaleString('id-ID')} gagal. ` +
-                `Saldo Rp${totalDeduction.toLocaleString('id-ID')} sudah dikembalikan.`,
+                `Saldo Rp${totalDeduction.toLocaleString(
+                    'id-ID'
+                )} sudah dikembalikan.`,
             data: {
                 type: 'withdraw_failed',
                 amount: nominal,
@@ -500,7 +553,157 @@ async function handleWithdrawCallback(wd: any, status: string) {
             totalRefund: totalDeduction,
         });
     }
+}
 
+// ============================================================
+// ✅ HANDLER: ORDER PAYMENT CALLBACK (QRIS / VA)
+// ============================================================
+async function handleOrderPaymentCallback(payment: any, status: string) {
+    const isSuccess = ['SUCCESS', 'SETTLED', 'PAID'].includes(status);
+    const isFailed = ['FAILED', 'EXPIRED', 'REJECTED'].includes(status);
+
+    // ═══════════════════════════════════════════════════════════
+    // IDEMPOTENCY
+    // ═══════════════════════════════════════════════════════════
+    if (payment.status === 'SUCCESS') {
+        logger.info('ℹ️ Order payment sudah SUCCESS, skip', {
+            partner_reff: payment.partner_reff,
+            orderId: payment.order_id,
+        });
+        return;
+    }
+
+    if (payment.status === 'FAILED' || payment.status === 'EXPIRED') {
+        logger.info('ℹ️ Order payment sudah final (FAILED/EXPIRED), skip', {
+            partner_reff: payment.partner_reff,
+            status: payment.status,
+        });
+        return;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // HANDLE SUCCESS — Customer sudah bayar
+    // ═══════════════════════════════════════════════════════════
+    if (isSuccess) {
+        // 1. Update order_payments
+        await supabaseAdmin
+            .from('order_payments')
+            .update({
+                status: 'SUCCESS',
+                paid_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', payment.id);
+
+        // 2. Update orders
+        await supabaseAdmin
+            .from('orders')
+            .update({
+                payment_status: 'paid',
+                paid_at: new Date().toISOString(),
+            })
+            .eq('id', payment.order_id);
+
+        // 3. Notif ke customer
+        await notificationService.sendToUser(payment.user_id, {
+            title: 'Pembayaran Berhasil ✅',
+            body: `Pembayaran Rp${Number(payment.amount).toLocaleString(
+                'id-ID'
+            )} untuk order #${payment.order_id} berhasil.`,
+            data: {
+                type: 'order_payment_success',
+                order_id: payment.order_id,
+                amount: Number(payment.amount),
+                method: payment.method,
+                partner_reff: payment.partner_reff,
+            },
+        });
+
+        // 4. Notif ke driver (kalau sudah ada driver yang accept)
+        try {
+            const { data: order } = await supabaseAdmin
+                .from('orders')
+                .select('driver_id, type, order_code')
+                .eq('id', payment.order_id)
+                .maybeSingle();
+
+            if (order?.driver_id) {
+                await notificationService.sendToUser(order.driver_id, {
+                    title: 'Pembayaran customer berhasil 💰',
+                    body: `Customer sudah bayar order #${order.order_code}. Lanjutkan trip.`,
+                    data: {
+                        type: 'order_payment_received',
+                        order_id: payment.order_id,
+                        amount: Number(payment.amount),
+                    },
+                });
+            }
+        } catch (err: any) {
+            logger.warn('Gagal notif driver order payment', {
+                orderId: payment.order_id,
+                error: err.message,
+            });
+        }
+
+        logger.info('✅ Order payment SUCCESS', {
+            orderId: payment.order_id,
+            partner_reff: payment.partner_reff,
+            amount: payment.amount,
+            method: payment.method,
+        });
+        return;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // HANDLE FAILED — Customer tidak bayar / expired
+    // ═══════════════════════════════════════════════════════════
+    if (isFailed) {
+        // 1. Update order_payments
+        await supabaseAdmin
+            .from('order_payments')
+            .update({
+                status: 'FAILED',
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', payment.id);
+
+        // 2. Update orders — payment_status failed, tapi order tetap pending
+        //    (customer bisa coba bayar lagi atau cancel)
+        await supabaseAdmin
+            .from('orders')
+            .update({
+                payment_status: 'failed',
+            })
+            .eq('id', payment.order_id);
+
+        // 3. Notif ke customer
+        await notificationService.sendToUser(payment.user_id, {
+            title: 'Pembayaran Gagal',
+            body: `Pembayaran untuk order #${payment.order_id} gagal atau kadaluarsa. Silakan coba lagi atau pilih metode lain.`,
+            data: {
+                type: 'order_payment_failed',
+                order_id: payment.order_id,
+                amount: Number(payment.amount),
+                method: payment.method,
+                partner_reff: payment.partner_reff,
+            },
+        });
+
+        logger.info('❌ Order payment FAILED', {
+            orderId: payment.order_id,
+            partner_reff: payment.partner_reff,
+            status,
+        });
+        return;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Status lain — log aja
+    // ═══════════════════════════════════════════════════════════
+    logger.info('ℹ️ Order payment status lain', {
+        partner_reff: payment.partner_reff,
+        status,
+    });
 }
 
 export default router;
