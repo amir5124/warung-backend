@@ -22,19 +22,23 @@ export const orderTimeoutService = {
     // ============================================================
     // 1. AUTO-CANCEL ORDER PENDING (cash/wallet) — tanpa driver
     // ============================================================
+    // ============================================================
+    // 1. AUTO-CANCEL ORDER CASH/WALLET — 5 menit tanpa driver
+    // ============================================================
     async cancelStalePendingOrders() {
         const cutoff = new Date(
             Date.now() - PENDING_TIMEOUT_MS
         ).toISOString();
 
-        // ⚠️ Hanya cancel order dengan payment_status = 'paid' (cash)
-        //    ATAU payment_method = 'cash' / 'wallet' yang sudah paid
-        //    Order QRIS/VA pending TIDAK di-cancel di sini
+        // ✅ Filter BENAR: hanya cash/wallet (payment_status bisa 'pending' atau 'paid')
+        //    Cash → payment_status = 'pending' (bayar ke driver)
+        //    Wallet → payment_status = 'paid' (potong saldo)
+        //    QRIS/VA TIDAK masuk sini (dihandle cancelStalePaymentOrders)
         const { data: stale, error } = await supabaseAdmin
             .from('orders')
             .select('id, customer_id, type, payment_method, payment_status')
             .eq('status', 'pending')
-            .eq('payment_status', 'paid')                    // ⬅️ hanya yang sudah paid
+            .in('payment_method', ['cash', 'wallet'])   // ⬅️ INI YANG BENAR
             .lt('created_at', cutoff);
 
         if (error) {
@@ -46,13 +50,12 @@ export const orderTimeoutService = {
 
         if (!stale || stale.length === 0) return;
 
-        logger.info('[orderTimeout] Auto-cancel order stale', {
+        logger.info('[orderTimeout] Auto-cancel order stale (cash/wallet)', {
             count: stale.length,
         });
 
         for (const order of stale) {
             try {
-                // Update + select (race-safe)
                 const { data: updated, error: updateErr } =
                     await supabaseAdmin
                         .from('orders')
@@ -78,10 +81,9 @@ export const orderTimeoutService = {
                     continue;
                 }
 
-                // Kalau tidak ada row yang di-update (sudah tidak pending), skip
                 if (!updated) {
                     logger.info(
-                        '[orderTimeout] Order sudah tidak pending, skip notif',
+                        '[orderTimeout] Order sudah tidak pending, skip',
                         { orderId: order.id }
                     );
                     continue;
@@ -105,6 +107,7 @@ export const orderTimeoutService = {
                         data: {
                             order_id: order.id,
                             type: 'order_timeout',
+                            reason: 'no_driver',
                             service: order.type,
                         },
                     })
@@ -118,10 +121,13 @@ export const orderTimeoutService = {
                         )
                     );
 
-                logger.info('[orderTimeout] Auto-cancelled 1 stale order', {
-                    orderId: order.id,
-                    paymentMethod: order.payment_method,
-                });
+                logger.info(
+                    '[orderTimeout] Auto-cancelled 1 stale order',
+                    {
+                        orderId: order.id,
+                        paymentMethod: order.payment_method,
+                    }
+                );
             } catch (err: any) {
                 logger.warn('[orderTimeout] Gagal cancel order stale', {
                     orderId: order.id,
@@ -130,7 +136,6 @@ export const orderTimeoutService = {
             }
         }
     },
-
     // ============================================================
     // 2. AUTO-CANCEL PAYMENT (QRIS/VA) — belum dibayar > 15 menit
     // ============================================================

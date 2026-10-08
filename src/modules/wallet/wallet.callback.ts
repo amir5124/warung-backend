@@ -558,6 +558,8 @@ async function handleWithdrawCallback(wd: any, status: string) {
 // ============================================================
 // ✅ HANDLER: ORDER PAYMENT CALLBACK (QRIS / VA)
 // ============================================================
+// src/modules/wallet/wallet.callback.ts
+
 async function handleOrderPaymentCallback(payment: any, status: string) {
     const isSuccess = ['SUCCESS', 'SETTLED', 'PAID'].includes(status);
     const isFailed = ['FAILED', 'EXPIRED', 'REJECTED'].includes(status);
@@ -574,10 +576,13 @@ async function handleOrderPaymentCallback(payment: any, status: string) {
     }
 
     if (payment.status === 'FAILED' || payment.status === 'EXPIRED') {
-        logger.info('ℹ️ Order payment sudah final (FAILED/EXPIRED), skip', {
-            partner_reff: payment.partner_reff,
-            status: payment.status,
-        });
+        logger.info(
+            'ℹ️ Order payment sudah final (FAILED/EXPIRED), skip',
+            {
+                partner_reff: payment.partner_reff,
+                status: payment.status,
+            }
+        );
         return;
     }
 
@@ -609,7 +614,7 @@ async function handleOrderPaymentCallback(payment: any, status: string) {
             title: 'Pembayaran Berhasil ✅',
             body: `Pembayaran Rp${Number(payment.amount).toLocaleString(
                 'id-ID'
-            )} untuk order #${payment.order_id} berhasil.`,
+            )} untuk order #${payment.order_id} berhasil. Kami sedang mencarikan driver untukmu.`,
             data: {
                 type: 'order_payment_success',
                 order_id: payment.order_id,
@@ -619,30 +624,34 @@ async function handleOrderPaymentCallback(payment: any, status: string) {
             },
         });
 
-        // 4. Notif ke driver (kalau sudah ada driver yang accept)
+        // ═══════════════════════════════════════════════════════
+        // 4. ✅ TRIGGER MATCHING DRIVER — setelah payment paid
+        // ═══════════════════════════════════════════════════════
         try {
-            const { data: order } = await supabaseAdmin
-                .from('orders')
-                .select('driver_id, type, order_code')
-                .eq('id', payment.order_id)
-                .maybeSingle();
+            const { orderService } = await import(
+                '../order/order.service'
+            );
 
-            if (order?.driver_id) {
-                await notificationService.sendToUser(order.driver_id, {
-                    title: 'Pembayaran customer berhasil 💰',
-                    body: `Customer sudah bayar order #${order.order_code}. Lanjutkan trip.`,
-                    data: {
-                        type: 'order_payment_received',
-                        order_id: payment.order_id,
-                        amount: Number(payment.amount),
-                    },
-                });
-            }
+            await orderService.triggerMatchingAfterPayment(
+                payment.order_id
+            );
+
+            logger.info(
+                '🚀 [orderPaymentCallback] Matching driver triggered',
+                {
+                    orderId: payment.order_id,
+                    partner_reff: payment.partner_reff,
+                }
+            );
         } catch (err: any) {
-            logger.warn('Gagal notif driver order payment', {
-                orderId: payment.order_id,
-                error: err.message,
-            });
+            logger.error(
+                '❌ [orderPaymentCallback] Gagal trigger matching',
+                {
+                    orderId: payment.order_id,
+                    error: err.message,
+                }
+            );
+            // Tidak throw — payment sudah tercatat paid
         }
 
         logger.info('✅ Order payment SUCCESS', {
@@ -667,7 +676,7 @@ async function handleOrderPaymentCallback(payment: any, status: string) {
             })
             .eq('id', payment.id);
 
-        // 2. Update orders — payment_status failed, tapi order tetap pending
+        // 2. Update orders — payment_status failed, order tetap pending
         //    (customer bisa coba bayar lagi atau cancel)
         await supabaseAdmin
             .from('orders')
