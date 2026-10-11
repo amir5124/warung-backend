@@ -70,7 +70,7 @@ export const createOrderSchema = z
             sender_landmark: z.string().optional(),
             receiver_landmark: z.string().optional(),
 
-            // ⬇️ Field paket WarSend
+            // ⬇️ Field paket USend
             package_type: z.string().optional(),
             package_size: z.enum(['kecil', 'sedang', 'besar']).optional(),
             package_weight: z.string().optional(),
@@ -119,7 +119,7 @@ export const updateStatusSchema = z.object({
             'cancelled',
         ]),
         reason: z.string().optional(),
-        // ⬇️ untuk validasi complete order WarSend
+        // ⬇️ untuk validasi complete order USend
         send_code: z.string().optional(),
     }),
 });
