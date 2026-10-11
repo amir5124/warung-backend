@@ -71,6 +71,9 @@ type OrderRow = {
     commission_rate: number | null;
     platform_earning: number | null;
     settlement_type: string | null;
+    subtotal: number | null;          // ✅ FOOD
+    packaging_fee: number | null;     // ✅ FOOD
+    merchant_earning: number | null;  // ✅ FOOD
 };
 
 type WalletRow = {
@@ -174,11 +177,15 @@ class WalletService {
     // SETTLE ORDER
     // ============================================================
     async settleOrder(orderId: number) {
+        // ────────────────────────────────────────────────────────
+        // 1. Ambil order dari DB
+        // ────────────────────────────────────────────────────────
         const { data: orderRaw, error: oErr } = await supabaseAdmin
             .from('orders')
             .select(`
                 id, type, status, driver_id, customer_id,
                 delivery_fee, driver_earning, total_fare,
+                subtotal, packaging_fee, merchant_earning,
                 tariff_code, payment_method, payment_status,
                 settled_at, commission_amount, commission_rate,
                 platform_earning, settlement_type
@@ -190,21 +197,46 @@ class WalletService {
 
         const order = orderRaw as unknown as OrderRow;
 
-        if (order.status !== 'completed') throw ApiError.badRequest('Order belum completed');
-        if (!order.driver_id) throw ApiError.badRequest('Order tidak punya driver');
+        // ────────────────────────────────────────────────────────
+        // 2. Validasi status
+        // ────────────────────────────────────────────────────────
+        if (order.status !== 'completed') {
+            throw ApiError.badRequest('Order belum completed');
+        }
+        if (!order.driver_id) {
+            throw ApiError.badRequest('Order tidak punya driver');
+        }
         if (order.settled_at) {
             logger.info('Order sudah di-settle, skip', { orderId });
             return { already_settled: true };
         }
 
-        const commissionRate = await this.getCommissionRate(order.type, order.tariff_code);
-        const commissionBase = Number(order.delivery_fee) || 0;
+        // ────────────────────────────────────────────────────────
+        // 3. Hitung komisi & driver earning
+        //    ✅ FOOD: dasar komisi = delivery_fee (jasa antar driver).
+        //    Harga makanan (subtotal + packaging) bukan penghasilan driver,
+        //    jadi tidak boleh dipotong komisi.
+        //    ride / send: tetap total_fare.
+        // ────────────────────────────────────────────────────────
+        const isFood = order.type === 'food';
+
+        const commissionRate = await this.getCommissionRate(
+            order.type,
+            order.tariff_code
+        );
+
+        const commissionBase = isFood
+            ? Number(order.delivery_fee) || 0                    // ✅ FOOD
+            : Number(order.total_fare) || 0;
         const commissionAmount = Math.round(commissionBase * commissionRate);
-        const driverEarning = Number(order.driver_earning) || 0;
+        const driverEarning = commissionBase - commissionAmount;
 
         const isCash = order.payment_method === 'cash';
         const settlementType = isCash ? 'cash' : 'gateway';
 
+        // ────────────────────────────────────────────────────────
+        // 4. Pastikan wallet ada
+        // ────────────────────────────────────────────────────────
         await supabaseAdmin
             .from('driver_wallets')
             .upsert(
@@ -226,26 +258,63 @@ class WalletService {
         let newCashDebt = Number(wallet.cash_debt);
         const ledgerEntries: any[] = [];
 
+        // metadata tambahan khusus food (untuk audit)
+        const foodMeta = isFood
+            ? {
+                order_type: 'food',
+                delivery_fee: Number(order.delivery_fee) || 0,
+                subtotal: Number(order.subtotal) || 0,
+                packaging_fee: Number(order.packaging_fee) || 0,
+                merchant_earning: Number(order.merchant_earning) || 0,
+            }
+            : { order_type: order.type };
+
+        // ────────────────────────────────────────────────────────
+        // 5. Bangun ledger entries berdasarkan metode pembayaran
+        // ────────────────────────────────────────────────────────
         if (isCash) {
+            // ── CASH ──
+            // Komisi jadi UTANG driver ke platform. Balance tidak berubah.
             newCashDebt = newCashDebt + commissionAmount;
 
             ledgerEntries.push({
-                driver_id: order.driver_id, order_id: order.id,
-                entry_type: 'earning_cash', amount: driverEarning, direction: 'in',
-                balance_after: newBalance, cash_debt_after: newCashDebt,
+                driver_id: order.driver_id,
+                order_id: order.id,
+                entry_type: 'earning_cash',
+                amount: driverEarning,
+                direction: 'in',
+                balance_after: newBalance,
+                cash_debt_after: newCashDebt,
                 description: `Pendapatan cash order #${order.id}`,
-                metadata: { payment_method: 'cash' },
+                metadata: {
+                    payment_method: 'cash',
+                    commission_base: commissionBase,
+                    driver_earning: driverEarning,
+                    ...foodMeta,
+                },
             });
 
             ledgerEntries.push({
-                driver_id: order.driver_id, order_id: order.id,
-                entry_type: 'commission_cash', amount: commissionAmount, direction: 'out',
-                balance_after: newBalance, cash_debt_after: newCashDebt,
+                driver_id: order.driver_id,
+                order_id: order.id,
+                entry_type: 'commission_cash',
+                amount: commissionAmount,
+                direction: 'out',
+                balance_after: newBalance,
+                cash_debt_after: newCashDebt,
                 description: `Komisi cash order #${order.id} (${(commissionRate * 100).toFixed(1)}%)`,
-                metadata: { commission_rate: commissionRate, commission_base: commissionBase },
+                metadata: {
+                    commission_rate: commissionRate,
+                    commission_base: commissionBase,
+                    commission_amount: commissionAmount,
+                    ...foodMeta,
+                },
             });
         } else {
-            const netEarning = driverEarning - commissionAmount;
+            // ── GATEWAY (qris / va / wallet) ──
+            // Uang sudah masuk ke platform. Lunasi utang cash dulu.
+            const netEarning = driverEarning;
+
             let debtPaid = 0;
             if (newCashDebt > 0) {
                 debtPaid = Math.min(newCashDebt, netEarning);
@@ -255,24 +324,41 @@ class WalletService {
             newBalance = newBalance + balanceCredit;
 
             ledgerEntries.push({
-                driver_id: order.driver_id, order_id: order.id,
-                entry_type: 'earning_gateway', amount: netEarning, direction: 'in',
-                balance_after: newBalance, cash_debt_after: newCashDebt,
+                driver_id: order.driver_id,
+                order_id: order.id,
+                entry_type: 'earning_gateway',
+                amount: netEarning,
+                direction: 'in',
+                balance_after: newBalance,
+                cash_debt_after: newCashDebt,
                 description: `Pendapatan order #${order.id} (net setelah komisi)`,
-                metadata: { payment_method: order.payment_method },
+                metadata: {
+                    payment_method: order.payment_method,
+                    commission_base: commissionBase,
+                    commission_amount: commissionAmount,
+                    net_earning: netEarning,
+                    ...foodMeta,
+                },
             });
 
             if (debtPaid > 0) {
                 ledgerEntries.push({
-                    driver_id: order.driver_id, order_id: order.id,
-                    entry_type: 'debt_payment', amount: debtPaid, direction: 'out',
-                    balance_after: newBalance, cash_debt_after: newCashDebt,
+                    driver_id: order.driver_id,
+                    order_id: order.id,
+                    entry_type: 'debt_payment',
+                    amount: debtPaid,
+                    direction: 'out',
+                    balance_after: newBalance,
+                    cash_debt_after: newCashDebt,
                     description: `Pelunasan utang cash`,
                     metadata: { debt_paid: debtPaid },
                 });
             }
         }
 
+        // ────────────────────────────────────────────────────────
+        // 6. Update wallet
+        // ────────────────────────────────────────────────────────
         const { error: walletErr } = await supabaseAdmin
             .from('driver_wallets')
             .update({
@@ -280,7 +366,8 @@ class WalletService {
                 cash_debt: newCashDebt,
                 total_earning: Number(wallet.total_earning) + driverEarning,
                 total_commission_paid:
-                    Number(wallet.total_commission_paid) + (isCash ? 0 : commissionAmount),
+                    Number(wallet.total_commission_paid) +
+                    (isCash ? 0 : commissionAmount),
                 total_commission_owed: newCashDebt,
             })
             .eq('driver_id', order.driver_id);
@@ -290,33 +377,55 @@ class WalletService {
             throw ApiError.internal('Gagal update wallet');
         }
 
+        // ────────────────────────────────────────────────────────
+        // 7. Insert ledger entries
+        // ────────────────────────────────────────────────────────
         const { error: ledgerErr } = await supabaseAdmin
             .from('driver_wallet_ledger')
             .insert(ledgerEntries);
 
-        if (ledgerErr) logger.error('Insert ledger gagal', { error: ledgerErr, orderId });
+        if (ledgerErr) {
+            logger.error('Insert ledger gagal', { error: ledgerErr, orderId });
+        }
 
+        // ────────────────────────────────────────────────────────
+        // 8. Update order
+        //    ✅ payment_status order cash → 'paid' setelah selesai
+        // ────────────────────────────────────────────────────────
         await supabaseAdmin
             .from('orders')
             .update({
                 commission_rate: commissionRate,
                 commission_amount: commissionAmount,
-                platform_earning: (Number(order.platform_earning) || 0) + commissionAmount,
+                platform_earning: commissionAmount,
+                driver_earning: driverEarning,
                 settled_at: new Date().toISOString(),
                 settlement_type: settlementType,
+                ...(isCash ? { payment_status: 'paid' } : {}),
             })
             .eq('id', order.id);
 
         logger.info('Order settled', {
-            orderId: order.id, driverId: order.driver_id, settlementType,
-            commissionAmount, newBalance, newCashDebt,
+            orderId: order.id,
+            orderType: order.type,
+            driverId: order.driver_id,
+            settlementType,
+            commissionBase,
+            commissionRate,
+            commissionAmount,
+            driverEarning,
+            newBalance,
+            newCashDebt,
         });
 
         return {
-            order_id: order.id, settlement_type: settlementType,
-            commission_rate: commissionRate, commission_amount: commissionAmount,
+            order_id: order.id,
+            settlement_type: settlementType,
+            commission_rate: commissionRate,
+            commission_amount: commissionAmount,
             driver_earning: driverEarning,
-            new_balance: newBalance, new_cash_debt: newCashDebt,
+            new_balance: newBalance,
+            new_cash_debt: newCashDebt,
         };
     }
 
