@@ -4,7 +4,8 @@ import crypto from 'crypto';
 import { supabaseAdmin } from '../../config/supabase';
 import { ApiError } from '../../utils/ApiError';
 import { logger } from '../../config/logger';
-import { notificationService } from '../notification/notification.service';  // ✅ TAMBAH
+import { notificationService } from '../notification/notification.service';
+import { MerchantWallet, merchantWalletService } from './merchant-wallet.service';// ✅ MERCHANT
 
 // ============================================================
 // KONFIGURASI LINKQU
@@ -208,6 +209,8 @@ class WalletService {
         }
         if (order.settled_at) {
             logger.info('Order sudah di-settle, skip', { orderId });
+            // ✅ MERCHANT: idempotent — mengulang settle merchant bila sebelumnya gagal
+            await merchantWalletService.settleOrder(order.id);
             return { already_settled: true };
         }
 
@@ -417,6 +420,12 @@ class WalletService {
             newBalance,
             newCashDebt,
         });
+
+        // ────────────────────────────────────────────────────────
+        // 9. ✅ MERCHANT: potong komisi merchant (food). Tidak pernah throw,
+        //    jadi settle driver di atas tidak terpengaruh.
+        // ────────────────────────────────────────────────────────
+        await merchantWalletService.settleOrder(order.id);
 
         return {
             order_id: order.id,
@@ -852,12 +861,21 @@ class WalletService {
         amount: number;
         bank_code: string;
         account_number: string;
-        role?: 'driver' | 'customer';
+        role?: 'driver' | 'customer' | 'merchant'; // ✅ MERCHANT
     }) {
         const role = dto.role ?? 'driver';
         const wallet = role === 'driver'
             ? await this.getWallet(userId, 'driver')
-            : await this.getWallet(userId, 'customer');
+            : role === 'merchant'
+                ? await merchantWalletService.getWallet(userId)   // ✅ MERCHANT
+                : await this.getWallet(userId, 'customer');
+
+        // ✅ MERCHANT: yang masih punya utang komisi tidak boleh tarik saldo
+        if (role === 'merchant' && (wallet as MerchantWallet).cash_debt > 0) {
+            throw ApiError.badRequest(
+                `Lunasi utang komisi dulu (Rp${(wallet as MerchantWallet).cash_debt.toLocaleString('id-ID')})`
+            );
+        }
 
         // ═══════════════════════════════════════════════════════════
         // ✅ HITUNG FEE ADMIN WITHDRAW
@@ -971,7 +989,7 @@ class WalletService {
     async withdrawExecute(
         userId: string,
         inquiryReff: string,
-        role: 'driver' | 'customer' = 'driver'
+        role: 'driver' | 'customer' | 'merchant' = 'driver' // ✅ MERCHANT
     ) {
         const { data: inq } = await supabaseAdmin
             .from('wallet_withdrawals')
@@ -1104,6 +1122,16 @@ class WalletService {
                         fee_admin: feeAdmin,
                         total_deduction: totalDeduction,
                     },
+                });
+            } else if (role === 'merchant') {
+                // ✅ MERCHANT
+                await merchantWalletService.debitWithdraw(userId, {
+                    nominal: nominalTransfer,
+                    feeAdmin,
+                    totalDeduction,
+                    bankCode: inq.bank_code,
+                    accountNumber: inq.account_number,
+                    partnerReff: partnerReffPay,
                 });
             } else {
                 const customerWallet = await this.getWallet(userId, 'customer');

@@ -2,10 +2,11 @@ import { supabaseAdmin } from '../../config/supabase';
 import { ApiError } from '../../utils/ApiError';
 import { matchingService } from './matching.service';
 import { notificationService } from '../notification/notification.service';
+import { merchantWalletService } from '../wallet/merchant-wallet.service'; // [MERCHANT]
 import { logger } from '../../config/logger';
 
 // ============================================================
-// RINGKASAN PERBAIKAN (cari tanda [FIX] di bawah)
+// RINGKASAN PERBAIKAN (cari tanda [FIX] dan [MERCHANT] di bawah)
 // 1. Potongan admin 5% dihapus: driver_earning = ongkir penuh,
 //    platform hanya mengambil komisi saat settleOrder.
 // 2. Jarak dari klien tidak dipercaya begitu saja: dipakai nilai
@@ -15,6 +16,15 @@ import { logger } from '../../config/logger';
 // 4. updateStatus memakai kunci status (optimistic lock) supaya
 //    dua permintaan bersamaan tidak lolos dua-duanya (mis. dobel
 //    "completed" yang memicu settle ganda).
+//
+// [MERCHANT] Integrasi alur komisi & utang merchant:
+// 5. Order food wajib punya merchant_id dan item.
+// 6. Harga item diambil dari tabel menu (bukan dari klien), karena
+//    subtotal menjadi dasar komisi & pendapatan merchant.
+// 7. Order food TUNAI ditolak bila toko sudah melewati batas utang
+//    komisi (aturan "boleh terima pesanan tunai?" dicek di server).
+// 8. Merchant hanya boleh membatalkan (saat pending/accepted),
+//    tidak boleh menyelesaikan order sendiri (memicu settle/saldo).
 // ============================================================
 
 // ============================================================
@@ -141,6 +151,14 @@ function haversineKm(
         Math.sin(dLng / 2) ** 2;
     return 2 * R * Math.asin(Math.sqrt(a));
 }
+
+type OrderItemInput = {
+    menu_item_id: number;
+    name: string;
+    variant: string | null;
+    qty: number;
+    price: number;
+};
 
 // ============================================================
 // Service
@@ -273,14 +291,88 @@ export const orderService = {
 
         // ═══════════════════════════════════════════════════════════
         // SUBTOTAL ITEMS (FOOD)
+        // [MERCHANT] Order food: merchant_id & item wajib, harga diambil
+        // dari tabel menu (bukan dari klien). Subtotal adalah dasar komisi
+        // merchant dan pendapatan toko, jadi tidak boleh bisa dimanipulasi.
         // ═══════════════════════════════════════════════════════════
         let subtotal = 0;
         let packaging_fee = 0;
-        if (input.items?.length) {
-            subtotal = input.items.reduce(
-                (s: number, i: any) => s + i.qty * i.price,
-                0
+        let validatedItems: OrderItemInput[] = [];
+
+        if (input.type === 'food') {
+            if (!input.merchant_id) {
+                throw ApiError.badRequest('merchant_id wajib untuk order makanan');
+            }
+            if (!Array.isArray(input.items) || input.items.length === 0) {
+                throw ApiError.badRequest('Item pesanan wajib diisi');
+            }
+
+            const ids: number[] = Array.from(
+                new Set<number>(
+                    input.items.map((i: any) => Number(i.menu_item_id))
+                )
             );
+            if (ids.some((id) => !Number.isFinite(id))) {
+                throw ApiError.badRequest('Item pesanan tidak valid');
+            }
+
+            const { data: menuRows, error: menuErr } = await supabaseAdmin
+                .from('menu_items')
+                .select('id, merchant_id, name, price, is_available')
+                .in('id', ids)
+                .eq('merchant_id', input.merchant_id);
+
+            if (menuErr) {
+                logger.error('[order.create] Gagal ambil menu', {
+                    error: menuErr.message,
+                    merchantId: input.merchant_id,
+                });
+                throw ApiError.internal('Gagal memvalidasi menu');
+            }
+
+            const menuById = new Map<number, any>(
+                (menuRows ?? []).map((m: any) => [Number(m.id), m])
+            );
+
+            validatedItems = input.items.map((i: any): OrderItemInput => {
+                const m = menuById.get(Number(i.menu_item_id));
+                const qty = Math.floor(Number(i.qty));
+
+                if (!m) {
+                    throw ApiError.badRequest(
+                        'Ada menu yang tidak tersedia di toko ini'
+                    );
+                }
+                if (m.is_available === false) {
+                    throw ApiError.badRequest(
+                        `Menu "${m.name}" sedang tidak tersedia`
+                    );
+                }
+                if (!(qty > 0)) {
+                    throw ApiError.badRequest('Jumlah item tidak valid');
+                }
+
+                return {
+                    menu_item_id: Number(m.id),
+                    name: m.name,
+                    variant: i.variant ?? null,
+                    qty,
+                    price: Number(m.price),
+                };
+            });
+
+            subtotal = validatedItems.reduce((s, i) => s + i.qty * i.price, 0);
+            packaging_fee = 0;
+        } else if (input.items?.length) {
+            // Jenis order lain (perilaku lama)
+            validatedItems = input.items.map((i: any): OrderItemInput => ({
+                menu_item_id: i.menu_item_id,
+                name: i.name,
+                variant: i.variant ?? null,
+                qty: i.qty,
+                price: i.price,
+            }));
+            subtotal = validatedItems.reduce((s, i) => s + i.qty * i.price, 0);
             packaging_fee = 0;
         }
 
@@ -296,6 +388,34 @@ export const orderService = {
             throw ApiError.badRequest(
                 'bank_code wajib diisi untuk metode transfer bank'
             );
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // [MERCHANT] Order food TUNAI: uang diterima langsung oleh toko,
+        // jadi komisi ditagih ke toko. Tolak bila utang komisi toko sudah
+        // melewati batas. Kalau pengecekan gagal (mis. tabel belum ada),
+        // order tidak diblokir tapi errornya dicatat.
+        // ═══════════════════════════════════════════════════════════
+        if (input.type === 'food' && paymentMethod === 'cash') {
+            try {
+                const elig = await merchantWalletService.getEligibility(
+                    String(input.merchant_id)
+                );
+                if (!elig.can_accept_cash_orders) {
+                    logger.warn('[order.create] Toko melewati batas utang, cash ditolak', {
+                        merchantId: input.merchant_id,
+                    });
+                    throw ApiError.badRequest(
+                        'Toko sedang tidak dapat menerima pesanan tunai. Silakan pilih pembayaran non-tunai.'
+                    );
+                }
+            } catch (err: any) {
+                if (err instanceof ApiError) throw err;
+                logger.error('[order.create] Cek eligibility merchant gagal', {
+                    merchantId: input.merchant_id,
+                    error: err?.message ?? err,
+                });
+            }
         }
 
         // Validasi saldo cukup untuk wallet
@@ -360,7 +480,7 @@ export const orderService = {
                 admin_fee,
                 total_fare,
                 driver_earning,
-                merchant_earning: subtotal,
+                merchant_earning: subtotal, // dikoreksi (subtotal − komisi) saat settle merchant
                 platform_earning,
                 payment_method: paymentMethod,       // ✅ dinamis
                 payment_status: 'pending',           // ✅ default
@@ -404,12 +524,13 @@ export const orderService = {
 
         // ═══════════════════════════════════════════════════════════
         // INSERT ORDER ITEMS (FOOD)
+        // [MERCHANT] memakai item yang sudah divalidasi (harga dari menu)
         // ═══════════════════════════════════════════════════════════
-        if (input.items?.length) {
+        if (validatedItems.length) {
             const { error: itemsErr } = await supabaseAdmin
                 .from('order_items')
                 .insert(
-                    input.items.map((i: any) => ({
+                    validatedItems.map((i) => ({
                         order_id: order.id,
                         menu_item_id: i.menu_item_id,
                         name: i.name,
@@ -1299,6 +1420,29 @@ export const orderService = {
         }
 
         // ============================================================
+        // [MERCHANT] Merchant hanya boleh MEMBATALKAN (saat pending/accepted).
+        // Menyelesaikan/mengubah status perjalanan memicu settle & saldo,
+        // jadi hanya driver/customer/admin yang boleh.
+        // ============================================================
+        if (isMerchant && !isCustomer && !isDriver && role !== 'admin') {
+            if (status !== 'cancelled') {
+                logger.warn('[order.updateStatus] Merchant coba ubah status', {
+                    orderId,
+                    userId,
+                    status,
+                });
+                throw ApiError.forbidden(
+                    'Merchant hanya dapat membatalkan pesanan'
+                );
+            }
+            if (order.status !== 'pending' && order.status !== 'accepted') {
+                throw ApiError.badRequest(
+                    'Pesanan tidak bisa dibatalkan oleh toko pada tahap ini'
+                );
+            }
+        }
+
+        // ============================================================
         // VALIDASI 1: order sudah final
         // ============================================================
         if (order.status === 'cancelled') {
@@ -1465,13 +1609,17 @@ export const orderService = {
                         ? 'driver'
                         : isCustomer
                             ? 'customer'
-                            : 'admin',
+                            : isMerchant
+                                ? 'merchant'
+                                : 'admin',
                 }
             );
         }
 
         // ============================================================
         // WALLET SETTLEMENT
+        // [MERCHANT] walletService.settleOrder juga memotong komisi merchant
+        // (food) lewat merchantWalletService.settleOrder.
         // ============================================================
         if (status === 'completed' && order.driver_id) {
             try {

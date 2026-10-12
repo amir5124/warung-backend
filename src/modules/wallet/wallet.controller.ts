@@ -1,6 +1,7 @@
 // src/modules/wallet/wallet.controller.ts
 import { Request, Response } from 'express';
 import { walletService } from './wallet.service';
+import { merchantWalletService } from './merchant-wallet.service'; // ✅ MERCHANT
 import { asyncHandler } from '../../utils/asyncHandler';
 import { ok, created } from '../../utils/response';
 import { ApiError } from '../../utils/ApiError';
@@ -8,8 +9,10 @@ import { ApiError } from '../../utils/ApiError';
 // ============================================================
 // Helper: role user untuk wallet
 // ============================================================
-function resolveWalletRole(req: Request): 'driver' | 'customer' {
-    return req.user?.role === 'driver' ? 'driver' : 'customer';
+function resolveWalletRole(req: Request): 'driver' | 'customer' | 'merchant' {
+    if (req.user?.role === 'driver') return 'driver';
+    if (req.user?.role === 'merchant') return 'merchant'; // ✅ MERCHANT
+    return 'customer';
 }
 
 export const walletController = {
@@ -17,9 +20,12 @@ export const walletController = {
     // GET /api/wallet
     // ============================================================
     getWallet: asyncHandler(async (req: Request, res: Response) => {
-        const data = req.user?.role === 'driver'
+        const role = resolveWalletRole(req);
+        const data = role === 'driver'
             ? await walletService.getWallet(req.user!.id, 'driver')
-            : await walletService.getWallet(req.user!.id, 'customer');
+            : role === 'merchant'
+                ? await merchantWalletService.getWallet(req.user!.id) // ✅ MERCHANT
+                : await walletService.getWallet(req.user!.id, 'customer');
         return ok(res, data);
     }),
     // ============================================================
@@ -32,7 +38,9 @@ export const walletController = {
 
         const data = role === 'driver'
             ? await walletService.listLedger(req.user!.id, limit, offset)
-            : await walletService.listLedgerCustomer(req.user!.id, limit, offset);
+            : role === 'merchant'
+                ? await merchantWalletService.listLedger(req.user!.id, limit, offset) // ✅ MERCHANT
+                : await walletService.listLedgerCustomer(req.user!.id, limit, offset);
 
         return ok(res, data);
     }),
