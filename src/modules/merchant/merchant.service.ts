@@ -246,6 +246,11 @@ export const merchantService = {
             throw ApiError.badRequest('Harga wajib diisi dan > 0');
         }
 
+        // Opsional: validasi URL berasal dari bucket kita
+        if (data.image_url && !/^https?:\/\//.test(data.image_url)) {
+            throw ApiError.badRequest('image_url tidak valid');
+        }
+
         const { data: menu, error } = await supabaseAdmin
             .from('menu_items')
             .insert({
@@ -268,19 +273,23 @@ export const merchantService = {
         return menu;
     },
 
+    // src/modules/merchant/merchant.service.ts
     async updateMenuItem(userId: string, itemId: number, data: any) {
+        const patch: Record<string, any> = {
+            updated_at: new Date().toISOString(),
+        };
+        // Hanya set field yang benar-benar dikirim
+        if ('category_id' in data) patch.category_id = data.category_id;
+        if ('name' in data) patch.name = data.name;
+        if ('description' in data) patch.description = data.description;
+        if ('price' in data) patch.price = data.price;
+        if ('image_url' in data) patch.image_url = data.image_url;
+        if ('is_available' in data) patch.is_available = data.is_available;
+        if ('stock' in data) patch.stock = data.stock;
+
         const { data: menu, error } = await supabaseAdmin
             .from('menu_items')
-            .update({
-                category_id: data.category_id,
-                name: data.name,
-                description: data.description,
-                price: data.price,
-                image_url: data.image_url,
-                is_available: data.is_available,
-                stock: data.stock,
-                updated_at: new Date().toISOString(),
-            })
+            .update(patch)
             .eq('id', itemId)
             .eq('merchant_id', userId)
             .select()
