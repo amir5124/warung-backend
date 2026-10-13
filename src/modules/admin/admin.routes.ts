@@ -23,9 +23,9 @@ router.put('/merchants/:id/verify', adminController.verifyMerchant);
 
 // Keuangan
 router.get('/finance/summary', adminController.financeSummary);
-router.get('/finance/withdrawals', adminController.listWithdrawals); // ?status=pending|approved|rejected|all
-router.put('/finance/withdrawals/:id/approve', adminController.approveWithdrawal);
-router.put('/finance/withdrawals/:id/reject', adminController.rejectWithdrawal); // body: { reason? }
+router.get('/finance/withdrawals', adminController.listWithdrawals); // ?source=linkqu|payout&status=pending|success|failed|all
+router.put('/finance/payouts/:id/approve', adminController.approvePayout); // pengajuan payout manual driver
+router.put('/finance/payouts/:id/reject', adminController.rejectPayout); //  body: { reason? } — dana dikembalikan
 router.get('/finance/topups', adminController.listTopups);
 router.get('/finance/commissions', adminController.listCommissions);
 

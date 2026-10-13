@@ -94,6 +94,7 @@ export const adminController = {
         return ok(
             res,
             await svc.listWithdrawals({
+                source: str(req.query.source),
                 status: str(req.query.status),
                 limit: req.query.limit,
                 offset: req.query.offset,
@@ -101,14 +102,14 @@ export const adminController = {
         );
     }),
 
-    approveWithdrawal: asyncHandler(async (req: Request, res: Response) => {
-        await svc.approveWithdrawal(req.params.id, adminIdOf(req));
-        return ok(res, null, 'Penarikan disetujui');
+    approvePayout: asyncHandler(async (req: Request, res: Response) => {
+        await svc.approvePayout(req.params.id, adminIdOf(req));
+        return ok(res, null, 'Pengajuan disetujui');
     }),
 
-    rejectWithdrawal: asyncHandler(async (req: Request, res: Response) => {
-        await svc.rejectWithdrawal(req.params.id, str(req.body?.reason), adminIdOf(req));
-        return ok(res, null, 'Penarikan ditolak');
+    rejectPayout: asyncHandler(async (req: Request, res: Response) => {
+        await svc.rejectPayout(req.params.id, str(req.body?.reason), adminIdOf(req));
+        return ok(res, null, 'Pengajuan ditolak, dana dikembalikan ke saldo');
     }),
 
     listTopups: asyncHandler(async (req: Request, res: Response) => {
