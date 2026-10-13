@@ -14,33 +14,35 @@ export const merchantService = {
      * Kalau function belum ada → fallback: ambil semua merchant is_open.
      */
     async findNearby(lat: number, lng: number, radiusM = 5000) {
-        // Coba RPC (PostGIS)
-        const { data, error } = await supabaseAdmin.rpc('nearby_merchants', {
-            p_lat: lat,
-            p_lng: lng,
-            p_radius: radiusM,
-        });
+        const { data, error } = await supabaseAdmin
+            .from('merchant_profiles')
+            .select(
+                'user_id, store_name, description, address, latitude, longitude, logo_url, is_open, is_verified, rating_avg, total_orders'
+            )
+            .not('latitude', 'is', null)
+            .not('longitude', 'is', null);
 
         if (error) {
-            logger.warn('RPC nearby_merchants gagal, fallback', {
-                error: error.message,
-            });
-
-            // Fallback: ambil merchant yang buka (tanpa distance)
-            const { data: fallback } = await supabaseAdmin
-                .from('merchant_profiles')
-                .select(
-                    'user_id, store_name, description, address, latitude, longitude, logo_url, is_open, rating_avg, total_orders'
-                )
-                .eq('is_open', true)
-                .not('latitude', 'is', null)
-                .not('longitude', 'is', null)
-                .limit(20);
-
-            return fallback ?? [];
+            logger.error('findNearby error', { error });
+            throw ApiError.internal('Gagal mengambil resto terdekat');
         }
 
-        return data ?? [];
+        const toRad = (d: number) => (d * Math.PI) / 180;
+        const dist = (la: number, lo: number) => {
+            const R = 6371000;
+            const dLat = toRad(la - lat);
+            const dLon = toRad(lo - lng);
+            const a =
+                Math.sin(dLat / 2) ** 2 +
+                Math.cos(toRad(lat)) * Math.cos(toRad(la)) * Math.sin(dLon / 2) ** 2;
+            return 2 * R * Math.asin(Math.sqrt(a));
+        };
+
+        return (data ?? [])
+            .map((m: any) => ({ ...m, distance_m: dist(m.latitude, m.longitude) }))
+            .filter((m: any) => m.distance_m <= radiusM)
+            .sort((a: any, b: any) => a.distance_m - b.distance_m)
+            .slice(0, 50);
     },
 
     /**
