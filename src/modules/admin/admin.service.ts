@@ -134,6 +134,37 @@ async function pendingWithdrawalStats() {
     return { count: lq.count + po.count, total: lq.total + po.total, linkqu: lq, payouts: po };
 }
 
+/**
+ * Total komisi dari pesanan SELESAI (orders.commission_amount) — definisi yang sama dengan daftar
+ * komisi di menu Keuangan. Tanpa `range` = seluruh waktu. Dijumlahkan per 1.000 baris agar tidak
+ * terpotong batas default Supabase. (Untuk data yang sangat besar, ganti dengan fungsi SQL SUM.)
+ * Catatan: komisi merchant dicatat merchantWalletService dan belum ikut dihitung.
+ */
+async function sumCommission(range?: { from: Date; to: Date }) {
+    const PAGE = 1000;
+    let total = 0;
+    for (let offset = 0; offset < 200_000; offset += PAGE) {
+        let q = sb
+            .from(T.orders)
+            .select('commission_amount')
+            .eq('status', 'completed')
+            .gt('commission_amount', 0)
+            .order('id', { ascending: true })
+            .range(offset, offset + PAGE - 1);
+        if (range) q = q.gte('completed_at', range.from.toISOString()).lt('completed_at', range.to.toISOString());
+
+        const { data, error } = await q;
+        if (error) {
+            logger.warn('[ADMIN] hitung komisi gagal', { error: error.message });
+            break;
+        }
+        const rows = data ?? [];
+        total += rows.reduce((sum: number, r: any) => sum + num(r.commission_amount), 0);
+        if (rows.length < PAGE) break;
+    }
+    return total;
+}
+
 // ─────────────────────────────────────────────────────────────
 // BERANDA
 // ─────────────────────────────────────────────────────────────
@@ -155,27 +186,14 @@ export async function getDashboard() {
         )
     );
 
-    // Komisi dari pesanan yang selesai hari ini (komisi driver, dicatat di orders.commission_amount).
-    // Catatan: komisi merchant dicatat oleh merchantWalletService — belum ikut dihitung di sini.
-    const commission = (async () => {
-        const { data, error } = await sb
-            .from(T.orders)
-            .select('commission_amount')
-            .eq('status', 'completed')
-            .gte('completed_at', todayStart.toISOString())
-            .lt('completed_at', tomorrow.toISOString())
-            .limit(5000);
-        if (error) {
-            logger.warn('[ADMIN] komisi hari ini gagal', { error: error.message });
-            return 0;
-        }
-        return (data ?? []).reduce((s: number, r: any) => s + num(r.commission_amount), 0);
-    })();
+    const commissionTodayP = sumCommission({ from: todayStart, to: tomorrow });
+    const commissionTotalP = sumCommission();
 
-    const [counts, commissionToday, activePartners, pendingMerchants, pendingDrivers, withdrawals] =
+    const [counts, commissionToday, commissionTotal, activePartners, pendingMerchants, pendingDrivers, withdrawals] =
         await Promise.all([
             perDay,
-            commission,
+            commissionTodayP,
+            commissionTotalP,
             safeCount(
                 'mitra aktif',
                 sb
@@ -192,6 +210,7 @@ export async function getDashboard() {
     return {
         orders_today: counts[6],
         commission_today: commissionToday,
+        commission_total: commissionTotal,
         active_partners: activePartners,
         pending_verification: {
             merchants: pendingMerchants,
@@ -532,7 +551,9 @@ export async function listCommissions(opts: { limit?: any; offset?: any }) {
         .range(offset, offset + limit - 1);
     if (error) throw dbError('orders', error);
 
+    const totalCommission = await sumCommission();
     return {
+        total_commission: totalCommission,
         items: (data ?? []).map((o: any) => ({
             id: o.id,
             order_code: o.order_code ?? String(o.id),
