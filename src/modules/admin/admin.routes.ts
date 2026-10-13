@@ -2,9 +2,14 @@
 import { Router } from 'express';
 import { adminController } from './admin.controller';
 import { requireAuth, requireRole } from '../../middleware/auth';
+import settingsAdminRoutes from '../settings/admin.routes';
 
 const router = Router();
 router.use(requireAuth, requireRole('admin'));
+
+// Pengaturan aplikasi & komisi → /api/admin/settings
+// (dipasang di sini supaya otomatis ikut aktif selama /api/admin aktif)
+router.use('/settings', settingsAdminRoutes);
 
 // Beranda
 router.get('/stats', adminController.stats); // lama, tetap dipertahankan
