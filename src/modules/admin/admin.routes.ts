@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { adminController } from './admin.controller';
 import { requireAuth, requireRole } from '../../middleware/auth';
 import settingsAdminRoutes from '../settings/admin.routes';
+import commissionRoutes from '../commission/commission.routes';
 
 const router = Router();
 router.use(requireAuth, requireRole('admin'));
@@ -10,6 +11,9 @@ router.use(requireAuth, requireRole('admin'));
 // Pengaturan aplikasi & komisi → /api/admin/settings
 // (dipasang di sini supaya otomatis ikut aktif selama /api/admin aktif)
 router.use('/settings', settingsAdminRoutes);
+
+// Tarif komisi per jenis order / kode tarif → /api/admin/commission-rates
+router.use('/commission-rates', commissionRoutes);
 
 // Beranda
 router.get('/stats', adminController.stats); // lama, tetap dipertahankan
