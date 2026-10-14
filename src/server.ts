@@ -28,6 +28,7 @@ import merchantRouter from './modules/merchant/merchant.routes';
 import uploadRoutes from './modules/upload/upload.routes';
 import settingsRouter from './modules/settings/settings.routes';
 import assetsRoutes from './modules/assets/assets.routes';
+import publicAssetsRoutes from './modules/assets/public.routes';
 
 
 import { orderTimeoutService } from './modules/order/order-timeout.service';
@@ -60,6 +61,7 @@ app.use('/api/activity', activityRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/settings', settingsRouter);
 app.use('/api', assetsRoutes);
+app.use('/api/public', publicAssetsRoutes);
 
 // ============================================================
 // CALLBACK LINKQU — tanpa auth (didaftarkan DULUAN)

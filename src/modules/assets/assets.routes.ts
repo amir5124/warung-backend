@@ -35,7 +35,6 @@ const upload = multer({
 // Semua route butuh auth + role admin
 router.use(requireAuth, requireRole('admin'));
 
-router.get('/public/assets', assetsController.listPublic);
 
 // ─────────────────────────────────────────────────────────────
 // Routes
