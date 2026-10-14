@@ -5,8 +5,7 @@ import { requireAuth, requireRole } from '../../middleware/auth';
 import settingsAdminRoutes from '../settings/admin.routes';
 import commissionRoutes from '../commission/commission.routes';
 
-// ✅ Tambahkan import ini
-import assetsRoutes from '../assets/assets.routes';
+
 
 const router = Router();
 router.use(requireAuth, requireRole('admin'));
@@ -14,8 +13,6 @@ router.use(requireAuth, requireRole('admin'));
 router.use('/settings', settingsAdminRoutes);
 router.use('/commission-rates', commissionRoutes);
 
-// ✅ Pasang route assets
-router.use('/assets', assetsRoutes);
 
 // Beranda
 router.get('/stats', adminController.stats);
