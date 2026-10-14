@@ -65,6 +65,18 @@ export const assetsController = {
         );
     }),
 
+    listPublic: asyncHandler(async (req: Request, res: Response) => {
+        const category = typeof req.query.category === 'string'
+            ? req.query.category
+            : undefined;
+
+        const result = await svc.listPublicAssets({
+            category,
+            limit: req.query.limit ? Number(req.query.limit) : 20,
+        });
+        return ok(res, result);
+    }),
+
     // GET /api/admin/assets/:id
     getById: asyncHandler(async (req: Request, res: Response) => {
         return ok(res, await svc.getAsset(Number(req.params.id)));

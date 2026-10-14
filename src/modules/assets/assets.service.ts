@@ -432,6 +432,43 @@ export async function getAssetStats() {
     };
 }
 
+// src/modules/assets/assets.service.ts
+export async function listPublicAssets(opts: {
+    category?: string;
+    limit?: number;
+}) {
+    const limit = Math.min(Math.max(Number(opts.limit) || 20, 1), 100);
+
+    let q = sb
+        .from(T)
+        .select('id, key, category, public_url, width, height, label')
+        .eq('is_active', true)
+        .order('created_at', { ascending: false })   // terbaru dulu
+        .limit(limit);
+
+    if (
+        opts.category &&
+        ALLOWED_CATEGORIES.includes(opts.category as any)
+    ) {
+        q = q.eq('category', opts.category);
+    }
+
+    const { data, error } = await q;
+    if (error) throw dbError('listPublic', error);
+
+    return {
+        items: (data ?? []).map((a: any) => ({
+            id: a.id,
+            key: a.key,
+            category: a.category,
+            url: a.public_url,
+            width: a.width,
+            height: a.height,
+            label: a.label,
+        })),
+    };
+}
+
 // ─────────────────────────────────────────────────────────────
 // BULK UPLOAD (multiple files sekaligus)
 // ─────────────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ import walletCallbackRouter from './modules/wallet/wallet.callback';  // ← TAM
 import merchantRouter from './modules/merchant/merchant.routes';
 import uploadRoutes from './modules/upload/upload.routes';
 import settingsRouter from './modules/settings/settings.routes';
+import assetsRoutes from './modules/assets/assets.routes';
 
 
 import { orderTimeoutService } from './modules/order/order-timeout.service';
@@ -58,6 +59,7 @@ app.use('/api/ratings', ratingRoutes);
 app.use('/api/activity', activityRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/settings', settingsRouter);
+app.use('/api', assetsRoutes);
 
 // ============================================================
 // CALLBACK LINKQU — tanpa auth (didaftarkan DULUAN)
