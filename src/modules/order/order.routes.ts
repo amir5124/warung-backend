@@ -44,6 +44,8 @@ router.post(
     orderController.merchantReject
 );
 
+router.post('/:id/merchant-ready', requireRole('merchant'), orderController.merchantReady);
+
 router.put('/:id/status', validate(updateStatusSchema), orderController.updateStatus);
 router.get('/:id', orderController.detail);
 router.get('/', orderController.list);

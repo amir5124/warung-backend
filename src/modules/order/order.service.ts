@@ -790,6 +790,80 @@ export const orderService = {
         return updated;
     },
 
+    async merchantMarkReady(orderId: number, merchantId: string) {
+        const ALLOWED = ['pending', 'accepted', 'arrived'];
+
+        const { data: order } = await supabaseAdmin
+            .from('orders')
+            .select('*')
+            .eq('id', orderId)
+            .single();
+
+        if (!order) throw ApiError.notFound('Order not found');
+        if (order.merchant_id !== merchantId) throw ApiError.forbidden();
+        if (order.type !== 'food' || order.merchant_status !== 'accepted') {
+            throw ApiError.badRequest('Pesanan belum diterima toko');
+        }
+        if (!ALLOWED.includes(order.status)) {
+            throw ApiError.conflict('Pesanan sudah diambil driver atau selesai');
+        }
+        if (order.merchant_ready_at) return order; // idempoten: tekan dua kali tidak masalah
+
+        // Atomik: hanya satu panggilan yang menang
+        const { data: updated } = await supabaseAdmin
+            .from('orders')
+            .update({ merchant_ready_at: new Date().toISOString() })
+            .eq('id', orderId)
+            .is('merchant_ready_at', null)
+            .in('status', ALLOWED)
+            .select()
+            .maybeSingle();
+
+        if (!updated) throw ApiError.conflict('Status pesanan sudah berubah, muat ulang');
+
+        const { data: store } = await supabaseAdmin
+            .from('merchant_profiles')
+            .select('store_name')
+            .eq('user_id', merchantId)
+            .maybeSingle();
+        const storeName = store?.store_name ?? 'Toko';
+
+        // Driver yang sudah menerima → diberi tahu
+        if (order.driver_id) {
+            await notificationService
+                .sendToUser(order.driver_id, {
+                    title: 'Pesanan sudah siap diambil 🍱',
+                    body: `${storeName}: pesanan ${order.order_code} siap, silakan diambil`,
+                    data: {
+                        order_id: String(orderId),
+                        type: 'food_ready',
+                        service: 'food',
+                    },
+                })
+                .catch((err: any) =>
+                    logger.warn('[order.ready] Gagal notif driver', { orderId, err: err.message })
+                );
+        }
+
+        // Customer ikut dikabari
+        await notificationService
+            .sendToUser(order.customer_id, {
+                title: 'Pesananmu sudah siap 🍱',
+                body: order.driver_id
+                    ? 'Driver sedang mengambil pesananmu.'
+                    : 'Menunggu driver mengambil pesananmu.',
+                data: {
+                    order_id: String(orderId),
+                    type: 'food_ready',
+                    service: 'food',
+                },
+            })
+            .catch(() => { });
+
+        logger.info('[order.ready] Ditandai siap', { orderId, merchantId, hasDriver: !!order.driver_id });
+        return updated;
+    },
+
     // ============================================================
     // DISPATCH KE DRIVER (matching + autobid + broadcast notifikasi)
     // Satu-satunya tempat logika ini (sebelumnya dobel di create & triggerMatching).

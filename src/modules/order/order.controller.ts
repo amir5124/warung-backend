@@ -40,6 +40,14 @@ export const orderController = {
         return ok(res, data, 'Pesanan ditolak toko');
     }),
 
+    merchantReady: asyncHandler(async (req: Request, res: Response) => {
+        const data = await orderService.merchantMarkReady(
+            Number(req.params.id),
+            req.user!.id
+        );
+        return ok(res, data, 'Pesanan ditandai siap');
+    }),
+
     updateStatus: asyncHandler(async (req: Request, res: Response) => {
         const orderId = Number(req.params.id);
 
