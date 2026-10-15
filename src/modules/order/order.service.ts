@@ -1771,10 +1771,51 @@ export const orderService = {
         limit = 50,
         offset = 0
     ) {
+        const withItems = (rows: any[]) =>
+            rows.map((o) => ({ ...o, items: o.order_items ?? [] }));
+
+        // Lampirkan driver (1 query untuk semua order di halaman ini)
+        const attachDrivers = async (rows: any[]) => {
+            const ids = Array.from(
+                new Set(rows.map((o) => o.driver_id).filter(Boolean))
+            ) as string[];
+            if (ids.length === 0) return rows;
+
+            const [profRes, dpRes] = await Promise.all([
+                supabaseAdmin
+                    .from('profiles')
+                    .select('id, full_name, phone, avatar_url')
+                    .in('id', ids),
+                supabaseAdmin
+                    .from('driver_profiles')
+                    .select('user_id, plate_number, vehicle_brand, vehicle_type')
+                    .in('user_id', ids),
+            ]);
+
+            const pMap = new Map<string, any>(
+                (profRes.data ?? []).map((p: any) => [p.id, p])
+            );
+            const dMap = new Map<string, any>(
+                (dpRes.data ?? []).map((d: any) => [d.user_id, d])
+            );
+
+            return rows.map((o) =>
+                o.driver_id
+                    ? {
+                        ...o,
+                        driver: {
+                            ...(pMap.get(o.driver_id) ?? {}),
+                            ...(dMap.get(o.driver_id) ?? {}),
+                        },
+                    }
+                    : o
+            );
+        };
+
         let query = supabaseAdmin
             .from('orders')
             .select(
-                '*, customer:profiles!orders_customer_id_fkey(id, full_name, phone, avatar_url)'
+                '*, order_items(*), customer:profiles!orders_customer_id_fkey(id, full_name, phone, avatar_url)'
             )
             .order('created_at', { ascending: false })
             .range(offset, offset + limit - 1);
@@ -1795,7 +1836,7 @@ export const orderService = {
 
             let fallback = supabaseAdmin
                 .from('orders')
-                .select('*')
+                .select('*, order_items(*)')
                 .order('created_at', { ascending: false })
                 .range(offset, offset + limit - 1);
 
@@ -1805,9 +1846,9 @@ export const orderService = {
             if (status) fallback = fallback.eq('status', status);
 
             const { data: f } = await fallback;
-            return f || [];
+            return attachDrivers(withItems(f || []));
         }
-        return data || [];
+        return attachDrivers(withItems(data || []));
     },
 
     // ============================================================
