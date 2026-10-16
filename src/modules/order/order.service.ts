@@ -447,6 +447,23 @@ export const orderService = {
             logger.info('[order.create] send_code', { sendCode });
         }
 
+        const { data: setting } = await supabaseAdmin
+            .from('settings')
+            .select('value')
+            .eq('key', 'order_accept_duration_sec')
+            .maybeSingle();
+
+        const acceptDurationSec = Number(setting?.value ?? 30);
+
+        const acceptExpiresAt = new Date(
+            Date.now() + acceptDurationSec * 1000
+        ).toISOString();
+
+        logger.info('[order.create] accept_expires_at', {
+            acceptDurationSec,
+            acceptExpiresAt,
+        });
+
         const { data: order, error } = await supabaseAdmin
             .from('orders')
             .insert({
@@ -481,6 +498,8 @@ export const orderService = {
                 option_name: tariffLabel,
                 send_code: sendCode,
                 status: 'pending',
+
+                accept_expires_at: acceptExpiresAt,
 
                 sender_landmark: input.sender_landmark ?? null,
                 receiver_landmark: input.receiver_landmark ?? null,
