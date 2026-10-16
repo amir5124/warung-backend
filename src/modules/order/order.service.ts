@@ -129,6 +129,52 @@ function haversineKm(
 
 const rp = (n: number) => `Rp${Number(n).toLocaleString('id-ID')}`;
 
+// ============================================================
+// ✅ [BARU] HELPER: Validasi toko buka & verified
+// Dipakai di create() & merchantRespond() supaya order yang
+// masuk ke toko yang sedang TUTUP selalu ditolak di server,
+// bukan cuma di UI aplikasi.
+// ============================================================
+async function assertMerchantOpen(
+    merchantId: string,
+    context: string
+): Promise<{ store_name: string }> {
+    const { data: merchant, error } = await supabaseAdmin
+        .from('merchant_profiles')
+        .select('user_id, store_name, is_open, is_verified')
+        .eq('user_id', merchantId)
+        .maybeSingle();
+
+    if (error) {
+        logger.error(`[${context}] Gagal cek merchant`, {
+            error: error.message,
+            merchantId,
+        });
+        throw ApiError.internal('Gagal memvalidasi toko');
+    }
+
+    if (!merchant) {
+        throw ApiError.badRequest('Toko tidak ditemukan');
+    }
+
+    if (merchant.is_verified === false) {
+        logger.warn(`[${context}] Toko belum verified`, { merchantId });
+        throw ApiError.badRequest('Toko belum terverifikasi');
+    }
+
+    if (merchant.is_open !== true) {
+        logger.warn(`[${context}] Toko sedang tutup`, {
+            merchantId,
+            storeName: merchant.store_name,
+        });
+        throw ApiError.badRequest(
+            `Toko "${merchant.store_name}" sedang tutup. Silakan pilih toko lain atau coba lagi nanti.`
+        );
+    }
+
+    return { store_name: merchant.store_name };
+}
+
 type OrderItemInput = {
     menu_item_id: number;
     name: string;
@@ -265,6 +311,11 @@ export const orderService = {
             if (!Array.isArray(input.items) || input.items.length === 0) {
                 throw ApiError.badRequest('Item pesanan wajib diisi');
             }
+
+            // ============================================================
+            // ✅ [BARU] VALIDASI: toko buka & verified
+            // ============================================================
+            await assertMerchantOpen(String(input.merchant_id), 'order.create');
 
             const ids: number[] = Array.from(
                 new Set<number>(input.items.map((i: any) => Number(i.menu_item_id)))
@@ -575,8 +626,6 @@ export const orderService = {
                     reference: payment.partner_reff,
                 });
 
-                // Toko / driver baru dikabari setelah callback pembayaran
-                // (wallet.callback → triggerMatchingAfterPayment).
                 return await orderService.getById(order.id, customerId, 'customer');
             } catch (err: any) {
                 logger.error('[order.create] ❌ Payment link gagal', {
@@ -597,9 +646,6 @@ export const orderService = {
             }
         }
 
-        // ═══════════════════════════════════════════════════════════
-        // CASH / WALLET: order siap → toko dulu (food) atau langsung driver
-        // ═══════════════════════════════════════════════════════════
         await orderService.onOrderReady(order, {
             pickup: {
                 latitude: Number(input.pickup_lat),
@@ -616,16 +662,12 @@ export const orderService = {
 
     // ============================================================
     // ORDER SIAP (pembayaran beres)
-    //  - food + merchant  → notifikasi ke TOKO, driver menunggu toko menerima
-    //  - lainnya          → langsung cari driver
-    // Aman dipanggil dua kali (callback pembayaran kadang datang ganda).
     // ============================================================
     async onOrderReady(
         order: any,
         hint: { pickup?: Coords; dropoff?: Coords } = {}
     ) {
         if (order.type === 'food' && order.merchant_id) {
-            // Atomik: hanya panggilan pertama yang berhasil (merchant_status masih null)
             const { data: claimed } = await supabaseAdmin
                 .from('orders')
                 .update({
@@ -653,7 +695,7 @@ export const orderService = {
     },
 
     // ============================================================
-    // NOTIF: pesanan baru → TOKO (+ kabari customer: menunggu toko)
+    // NOTIF: pesanan baru → TOKO
     // ============================================================
     async notifyMerchantNewOrder(order: any) {
         const { data: items } = await supabaseAdmin
@@ -720,6 +762,14 @@ export const orderService = {
             throw ApiError.conflict('Pesanan sudah direspons');
         }
 
+        // ============================================================
+        // ✅ [BARU] VALIDASI: toko masih buka saat terima pesanan
+        // (mencegah toko terima order padahal sudah tutup)
+        // ============================================================
+        if (accept) {
+            await assertMerchantOpen(merchantId, 'order.merchantRespond');
+        }
+
         const now = new Date().toISOString();
         const patch: any = accept
             ? {
@@ -735,7 +785,6 @@ export const orderService = {
                 cancellation_reason: opts.reason ?? 'Ditolak toko',
             };
 
-        // Atomik: hanya satu respons yang menang
         const { data: updated } = await supabaseAdmin
             .from('orders')
             .update(patch)
@@ -769,7 +818,6 @@ export const orderService = {
                 })
                 .catch(() => { });
 
-            // Baru sekarang driver dicari
             await orderService.dispatchToDrivers(orderId);
         } else {
             orderService.flagRefundIfPaid(updated);
@@ -807,9 +855,8 @@ export const orderService = {
         if (!ALLOWED.includes(order.status)) {
             throw ApiError.conflict('Pesanan sudah diambil driver atau selesai');
         }
-        if (order.merchant_ready_at) return order; // idempoten: tekan dua kali tidak masalah
+        if (order.merchant_ready_at) return order;
 
-        // Atomik: hanya satu panggilan yang menang
         const { data: updated } = await supabaseAdmin
             .from('orders')
             .update({ merchant_ready_at: new Date().toISOString() })
@@ -828,7 +875,6 @@ export const orderService = {
             .maybeSingle();
         const storeName = store?.store_name ?? 'Toko';
 
-        // Driver yang sudah menerima → diberi tahu
         if (order.driver_id) {
             await notificationService
                 .sendToUser(order.driver_id, {
@@ -845,7 +891,6 @@ export const orderService = {
                 );
         }
 
-        // Customer ikut dikabari
         await notificationService
             .sendToUser(order.customer_id, {
                 title: 'Pesananmu sudah siap 🍱',
@@ -865,8 +910,7 @@ export const orderService = {
     },
 
     // ============================================================
-    // DISPATCH KE DRIVER (matching + autobid + broadcast notifikasi)
-    // Satu-satunya tempat logika ini (sebelumnya dobel di create & triggerMatching).
+    // DISPATCH KE DRIVER
     // ============================================================
     async dispatchToDrivers(
         orderId: number,
@@ -902,7 +946,6 @@ export const orderService = {
             return;
         }
 
-        // Food: tunggu toko menerima
         if (
             order.type === 'food' &&
             order.merchant_id &&
@@ -915,7 +958,6 @@ export const orderService = {
             return;
         }
 
-        // Idempotensi: sudah pernah dikirim ke driver
         const { count: bidCount } = await supabaseAdmin
             .from('order_bids')
             .select('id', { count: 'exact', head: true })
@@ -971,7 +1013,6 @@ export const orderService = {
             return;
         }
 
-        // ── Autobid ──
         let autobidDriver: string | null = null;
         try {
             const { autobidService } = await import('./autobid.service');
@@ -991,7 +1032,6 @@ export const orderService = {
             });
         }
 
-        // ── Data untuk payload notifikasi ──
         const { data: custProfile } = await supabaseAdmin
             .from('profiles')
             .select('full_name, avatar_url')
@@ -1102,7 +1142,6 @@ export const orderService = {
         } else {
             const driverCopy = newOrderForDriver({ ...driverCopyBase, autobid: false });
 
-            // Paralel, bukan satu per satu
             const results = await Promise.allSettled(
                 drivers.map((d) =>
                     notificationService.sendToUser(d.user_id, {
@@ -1130,7 +1169,6 @@ export const orderService = {
         logger.info('[order.dispatch] ✅ DONE', { orderId });
     },
 
-    // Toko dikabari saat driver sudah dapat (food)
     async notifyMerchantDriverAssigned(order: any, driverName?: string | null) {
         if (order.type !== 'food' || !order.merchant_id) return;
         await notificationService
@@ -1153,11 +1191,6 @@ export const orderService = {
             );
     },
 
-    // ============================================================
-    // Penanda refund. Dipanggil setiap kali order yang SUDAH DIBAYAR dibatalkan.
-    // TODO: sambungkan ke fungsi refund di walletService milikmu.
-    // Sampai tersambung, log level error ini yang jadi pengingat refund manual.
-    // ============================================================
     flagRefundIfPaid(order: any) {
         if (order?.payment_status === 'paid' && order.payment_method !== 'cash') {
             logger.error('[order] PERLU REFUND — order dibatalkan setelah dibayar', {
@@ -1281,7 +1314,6 @@ export const orderService = {
             .update({ status: 'busy' })
             .eq('user_id', driverId);
 
-        // ── Notif ke customer ──
         const { data: driverProfile } = await supabaseAdmin
             .from('profiles')
             .select('full_name')
@@ -1328,7 +1360,6 @@ export const orderService = {
             });
         }
 
-        // ── Notif ke toko (food) ──
         await orderService.notifyMerchantDriverAssigned(
             order,
             firstName(driverProfile?.full_name)
@@ -1337,10 +1368,6 @@ export const orderService = {
         return data;
     },
 
-    /**
-     * Dipanggil callback pembayaran (QRIS/VA) setelah status paid.
-     * Sekarang hanya pintu masuk: food → toko dulu, lainnya → driver.
-     */
     async triggerMatchingAfterPayment(orderId: number) {
         logger.info('[order.triggerMatching] START', { orderId });
 
@@ -1390,7 +1417,6 @@ export const orderService = {
             newStatus: status,
         });
 
-        // 'accepted' hanya lewat accept() driver / autobid
         if (status === 'accepted' && role !== 'admin') {
             throw ApiError.badRequest(
                 'Gunakan endpoint accept untuk menerima order'
@@ -1421,7 +1447,6 @@ export const orderService = {
                 });
                 throw ApiError.forbidden('Merchant hanya dapat membatalkan pesanan');
             }
-            // Toko membatalkan saat masih menunggu respons = menolak pesanan
             if (order.status === 'pending' && order.merchant_status === 'waiting') {
                 return await orderService.merchantRespond(orderId, userId, false, {
                     reason,
@@ -1522,7 +1547,6 @@ export const orderService = {
                 .eq('status', 'pending');
         }
 
-        // Cancel saat masih pending (belum ada driver): bersihkan bids
         if (status === 'cancelled' && !order.driver_id) {
             await supabaseAdmin
                 .from('order_bids')
@@ -1566,9 +1590,6 @@ export const orderService = {
             }
         }
 
-        // ═══════════════════════════════════════════════════════════
-        // NOTIFIKASI (copy module per layanan)
-        // ═══════════════════════════════════════════════════════════
         const { data: orderCustomerProfile } = await supabaseAdmin
             .from('profiles')
             .select('full_name')
@@ -1774,7 +1795,6 @@ export const orderService = {
         const withItems = (rows: any[]) =>
             rows.map((o) => ({ ...o, items: o.order_items ?? [] }));
 
-        // Lampirkan driver (1 query untuk semua order di halaman ini)
         const attachDrivers = async (rows: any[]) => {
             const ids = Array.from(
                 new Set(rows.map((o) => o.driver_id).filter(Boolean))
