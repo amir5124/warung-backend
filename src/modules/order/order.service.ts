@@ -1107,6 +1107,7 @@ export const orderService = {
             package_type: order.package_type ?? '',
             package_size: order.package_size ?? '',
             package_weight: order.package_weight ?? '',
+            accept_expires_at: order.accept_expires_at ?? null,
         };
 
         const driverCopyBase = {
