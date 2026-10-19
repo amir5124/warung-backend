@@ -10,11 +10,11 @@ import { notificationService } from '../notification/notification.service';  // 
 // KONFIGURASI LINKQU
 // ============================================================
 const LINKQU_CONFIG = {
-    clientId: process.env.LINKQU_CLIENT_ID ?? 'fdf1a7d7-076c-4430-80f6-95ea4a37ed7a',
-    clientSecret: process.env.LINKQU_CLIENT_SECRET ?? 'WqbK9mSyehyenvy9zY6MNtM1s',
-    username: process.env.LINKQU_USERNAME ?? 'LI153QRSA',
-    pin: process.env.LINKQU_PIN ?? 'GFGICTz4xnPRGil',
-    serverKey: process.env.LINKQU_SERVER_KEY ?? 'GFGICTz4xnPRGil',
+    clientId: process.env.LINKQU_CLIENT_ID ?? '48df1892-496f-4b57-8559-4703efa6246f',
+    clientSecret: process.env.LINKQU_CLIENT_SECRET ?? 'NpvjNp5yG69tQApkAUyuwiof',
+    username: process.env.LINKQU_USERNAME ?? 'LI327CLSW',
+    pin: process.env.LINKQU_PIN ?? 'eTL19V5X6SZGw1R',
+    serverKey: process.env.LINKQU_SERVER_KEY ?? 'N4uZUHoY03X25RBtR97Sfm2G',
     baseUrl: process.env.LINKQU_BASE_URL ?? 'https://api.linkqu.id/linkqu-partner',
 };
 
