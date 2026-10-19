@@ -11,7 +11,7 @@ import { notificationService } from '../notification/notification.service';  // 
 // ============================================================
 const LINKQU_CONFIG = {
     clientId: process.env.LINKQU_CLIENT_ID ?? '48df1892-496f-4b57-8559-4703efa6246f',
-    clientSecret: process.env.LINKQU_CLIENT_SECRET ?? 'NpvjNp5yG69tQApkAUyuwiof',
+    clientSecret: process.env.LINKQU_CLIENT_SECRET ?? 'NpvjNp5yG69tQApkAUyuwiofD',
     username: process.env.LINKQU_USERNAME ?? 'LI327CLSW',
     pin: process.env.LINKQU_PIN ?? 'eTL19V5X6SZGw1R',
     serverKey: process.env.LINKQU_SERVER_KEY ?? 'N4uZUHoY03X25RBtR97Sfm2G',
