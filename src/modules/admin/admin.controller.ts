@@ -76,6 +76,8 @@ export const adminController = {
             await svc.listOrders({
                 status: str(req.query.status),
                 search: str(req.query.search),
+                from: str(req.query.from),      // ← BARU
+                to: str(req.query.to),          // ← BARU
                 limit: req.query.limit,
                 offset: req.query.offset,
             })
