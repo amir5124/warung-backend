@@ -36,7 +36,7 @@ const STATUS_GROUPS: Record<string, string[]> = {
     batal: ['cancelled'],
 };
 
-const SERVICE_LABEL: Record<string, string> = { ride: 'WarJek/WarCar', send: 'WarSend', food: 'WarFood' };
+const SERVICE_LABEL: Record<string, string> = { ride: 'URide/UCar', send: 'USend', food: 'UFood' };
 
 // ─────────────────────────────────────────────────────────────
 // Util

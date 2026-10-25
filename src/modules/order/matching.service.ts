@@ -1,6 +1,7 @@
 // src/modules/order/matching.service.ts
 import { supabaseAdmin } from '../../config/supabase';
 import { logger } from '../../config/logger';
+import { filterDriversByBalance } from './driver-eligibility';
 
 // ============================================================
 // KONFIGURASI
@@ -21,7 +22,7 @@ const MATCH_LIMIT = 20;
  * Ride/send punya varian S dan L, jadi tidak ditebak.
  *
  * Sesuaikan lewat env FOOD_TARIFF_CODE kalau kodenya berbeda
- 
+ * (LinkU: 'ufood').
  */
 const DEFAULT_TARIFF_BY_TYPE: Record<string, string | undefined> = {
     food: process.env.FOOD_TARIFF_CODE ?? 'warfood',
@@ -119,9 +120,9 @@ export const matchingService = {
             return [];
         }
 
-        const result = (drivers ?? []) as NearbyDriverResult[];
-
-        console.log('[matching] RPC result:', result.length, 'driver');
+        const rawResult = (drivers ?? []) as NearbyDriverResult[];
+        const result = await filterDriversByBalance(rawResult);
+        console.log('[matching] RPC:', rawResult.length, '→ lolos saldo:', result.length);
 
         if (result.length === 0) {
             logger.warn('No drivers found', {

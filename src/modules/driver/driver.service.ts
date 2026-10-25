@@ -72,6 +72,34 @@ function parseLocation(
 }
 
 // ============================================================
+// Zona waktu aplikasi (default WIB = UTC+7, bisa diubah lewat env
+// APP_TZ_OFFSET_MIN). Server biasanya berjalan di UTC, jadi tanpa ini
+// "hari ini" dihitung mulai 07:00 WIB dan order dini hari (00:00-07:00 WIB)
+// masuk ke hari kemarin.
+// ============================================================
+const TZ_OFFSET_MIN = Number(process.env.APP_TZ_OFFSET_MIN ?? 420);
+
+/** Awal hari / minggu (Senin) / bulan menurut zona waktu aplikasi, sebagai instant UTC */
+function periodStarts(now: Date = new Date()) {
+    const offMs = TZ_OFFSET_MIN * 60_000;
+    const local = new Date(now.getTime() + offMs); // dibaca lewat getUTC*
+    const y = local.getUTCFullYear();
+    const m = local.getUTCMonth();
+    const d = local.getUTCDate();
+    const dow = local.getUTCDay(); // 0 = Minggu
+    const diff = dow === 0 ? 6 : dow - 1; // mundur ke Senin
+
+    const at = (yy: number, mm: number, dd: number) =>
+        new Date(Date.UTC(yy, mm, dd) - offMs);
+
+    return {
+        today: at(y, m, d),
+        week: at(y, m, d - diff),
+        month: at(y, m, 1),
+    };
+}
+
+// ============================================================
 // Service
 // ============================================================
 export const driverService = {
@@ -263,11 +291,11 @@ export const driverService = {
             if (current?.services) {
                 // Cek apakah ada service motor-only yang tidak kompatibel
                 const motorOnlyServices = [
-                    'warjek_s',
-                    'warjek_l',
-                    'warsend_s',
-                    'warsend_l',
-                    'warfood',
+                    'uride_s',
+                    'uride_l',
+                    'usend_s',
+                    'usend_l',
+                    'ufood',
                 ];
                 const incompatible = current.services.filter((s: string) =>
                     motorOnlyServices.includes(s)
@@ -333,13 +361,13 @@ export const driverService = {
         // 🆕 3. Mapping service → kendaraan yang cocok
         // (samakan dengan frontend edit-services.tsx)
         const SERVICE_VEHICLE_RULES: Record<string, ('motor' | 'mobil')[]> = {
-            warjek_s: ['motor'],
-            warjek_l: ['motor'],
-            warsend_s: ['motor'],
-            warsend_l: ['motor'],
-            warfood: ['motor'],         // 🆕 motor bisa WarFood
-            warcar_s: ['mobil'],
-            warcar_l: ['mobil'],
+            uride_s: ['motor'],
+            uride_l: ['motor'],
+            usend_s: ['motor'],
+            usend_l: ['motor'],
+            ufood: ['motor'],
+            ucar_s: ['mobil'],
+            ucar_l: ['mobil'],
         };
 
         // 🆕 4. Filter service yang tidak cocok dengan kendaraan
@@ -386,21 +414,11 @@ export const driverService = {
     // GET EARNINGS (with wallet info)
     // ============================================================
     async getEarnings(driverId: string) {
-        const now = new Date();
-
-        // Awal hari ini (00:00)
-        const startOfToday = new Date(now);
-        startOfToday.setHours(0, 0, 0, 0);
-
-        // Awal minggu (Senin 00:00)
-        const startOfWeek = new Date(now);
-        const day = startOfWeek.getDay();
-        const diff = day === 0 ? 6 : day - 1;
-        startOfWeek.setDate(startOfWeek.getDate() - diff);
-        startOfWeek.setHours(0, 0, 0, 0);
-
-        // Awal bulan
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        // Batas hari / minggu / bulan menurut WIB (bukan zona waktu server)
+        const starts = periodStarts();
+        const startOfToday = starts.today;
+        const startOfWeek = starts.week;
+        const startOfMonth = starts.month;
 
         // Query orders completed
         const { data: orders, error } = await supabaseAdmin
