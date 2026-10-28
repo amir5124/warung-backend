@@ -1385,15 +1385,57 @@ export const orderService = {
             );
     },
 
-    flagRefundIfPaid(order: any) {
-        if (order?.payment_status === 'paid' && order.payment_method !== 'cash') {
-            logger.error('[order] PERLU REFUND — order dibatalkan setelah dibayar', {
+    /**
+     * Kembalikan dana order yang SUDAH dibayar non-tunai (wallet / QRIS / VA)
+     * ke saldo wallet customer. Idempotent (aman dipanggil berulang):
+     * logikanya ada di walletService.refundOrder (klaim atomik orders.refunded_at + wallet_transactions).
+     * Tidak pernah melempar error; kegagalan dicatat agar bisa dicoba ulang oleh sweeper.
+     * Return: jumlah yang dikembalikan (0 = tidak ada yang perlu / sudah pernah).
+     */
+    async refundIfPaid(order: any): Promise<number> {
+        if (!order?.id) return 0;
+        if (order.payment_status !== 'paid' || order.payment_method === 'cash') return 0;
+
+        try {
+            const { walletService } = await import('../wallet/wallet.service');
+            const { amount } = await walletService.refundOrder({ id: order.id });
+
+            if (amount > 0) {
+                logger.info('[order] ✅ Refund ke saldo wallet', {
+                    orderId: order.id,
+                    method: order.payment_method,
+                    amount,
+                    customerId: order.customer_id,
+                });
+
+                await notificationService
+                    .sendToUser(order.customer_id, {
+                        title: 'Dana dikembalikan 💸',
+                        body: `${rp(amount)} sudah kembali ke saldo Wallet kamu.`,
+                        data: {
+                            order_id: String(order.id),
+                            type: 'order_refunded',
+                            service: order.type ?? '',
+                        },
+                    })
+                    .catch(() => { });
+            }
+            return amount;
+        } catch (err: any) {
+            logger.error('[order] REFUND GAGAL — akan dicoba ulang / cek manual', {
                 orderId: order.id,
                 method: order.payment_method,
                 amount: order.total_fare,
                 customerId: order.customer_id,
+                error: err?.message,
             });
+            return 0;
         }
+    },
+
+    /** Nama lama dipertahankan agar semua pemanggil (timeout, toko menolak, updateStatus) otomatis refund. */
+    flagRefundIfPaid(order: any) {
+        void orderService.refundIfPaid(order);
     },
 
     // ============================================================
@@ -1745,7 +1787,21 @@ export const orderService = {
         });
 
         if (status === 'cancelled') {
-            orderService.flagRefundIfPaid(order);
+            // Refund otomatis hanya bila driver belum mulai bekerja
+            // (belum ada driver, atau baru menerima). Setelah itu → tinjau manual,
+            // karena bisa ada biaya / belanjaan yang sudah dibeli.
+            const autoRefund = !order.driver_id || order.status === 'accepted';
+            if (autoRefund) {
+                orderService.flagRefundIfPaid(order);
+            } else if (order.payment_status === 'paid' && order.payment_method !== 'cash') {
+                logger.warn('[order] Dibatalkan setelah driver berjalan — refund perlu ditinjau manual', {
+                    orderId,
+                    fromStatus: order.status,
+                    method: order.payment_method,
+                    amount: order.total_fare,
+                    customerId: order.customer_id,
+                });
+            }
         }
 
         if (
