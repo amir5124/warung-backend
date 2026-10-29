@@ -41,6 +41,9 @@ const MAX_JASTIP_BUDGET = 500_000; // jastip prabayar (bisa diubah via settings)
 const MAX_JASTIP_ITEMS = 30;
 const VA_MIN_AMOUNT = 10_000; // minimal transfer bank (VA) LinkQu
 
+// 🆕 Biaya kode terima paket (khusus send). Harus sama dengan frontend.
+const RECEIVE_CODE_FEE = 2_000;
+
 // Jastip TUNAI (customer bayar ke driver saat antar). Semua bisa diubah di tabel
 // `app_settings` tanpa deploy ulang:
 //   jastip_cash_max_budget  → batas belanja tunai (default 100000)
@@ -161,10 +164,7 @@ function haversineKm(
 const rp = (n: number) => `Rp${Number(n).toLocaleString('id-ID')}`;
 
 // ============================================================
-// ✅ [BARU] HELPER: Validasi toko buka & verified
-// Dipakai di create() & merchantRespond() supaya order yang
-// masuk ke toko yang sedang TUTUP selalu ditolak di server,
-// bukan cuma di UI aplikasi.
+// ✅ HELPER: Validasi toko buka & verified
 // ============================================================
 async function assertMerchantOpen(
     merchantId: string,
@@ -229,6 +229,7 @@ export const orderService = {
             type: input.type,
             tariffCode: input.tariff_code,
             paymentMethod: input.payment_method,
+            useSendCode: input.use_send_code,
         });
 
         const reportedKm = Number(input.distance_km);
@@ -336,6 +337,21 @@ export const orderService = {
             distanceKm,
         });
 
+        // 🆕 Kode terima paket (khusus send).
+        // Fee ditambahkan di backend supaya orders.total_fare konsisten,
+        // tidak bergantung pada harga kiriman frontend.
+        const useSendCode =
+            input.type === 'send' && input.use_send_code !== false;
+
+        if (input.type === 'send' && useSendCode) {
+            delivery_fee += RECEIVE_CODE_FEE;
+            driver_earning += RECEIVE_CODE_FEE;
+            logger.info('[order.create] Fee kode terima ditambahkan', {
+                fee: RECEIVE_CODE_FEE,
+                delivery_fee,
+            });
+        }
+
         let subtotal = 0;
         let packaging_fee = 0;
         let validatedItems: OrderItemInput[] = [];
@@ -349,7 +365,7 @@ export const orderService = {
             }
 
             // ============================================================
-            // ✅ [BARU] VALIDASI: toko buka & verified
+            // ✅ VALIDASI: toko buka & verified
             // ============================================================
             await assertMerchantOpen(String(input.merchant_id), 'order.create');
 
@@ -561,8 +577,9 @@ export const orderService = {
             }
         }
 
+        // 🆕 send_code hanya di-generate kalau customer mengaktifkan kode terima
         let sendCode: string | null = null;
-        if (input.type === 'send') {
+        if (input.type === 'send' && useSendCode) {
             const { data: codeData, error: codeErr } = await supabaseAdmin.rpc(
                 'generate_send_code'
             );
@@ -576,6 +593,8 @@ export const orderService = {
                 sendCode = codeData as string;
             }
             logger.info('[order.create] send_code', { sendCode });
+        } else if (input.type === 'send') {
+            logger.info('[order.create] send tanpa kode (use_send_code=false)');
         }
 
         const { data: setting } = await supabaseAdmin
@@ -917,10 +936,7 @@ export const orderService = {
             throw ApiError.conflict('Pesanan sudah direspons');
         }
 
-        // ============================================================
-        // ✅ [BARU] VALIDASI: toko masih buka saat terima pesanan
-        // (mencegah toko terima order padahal sudah tutup)
-        // ============================================================
+        // ✅ VALIDASI: toko masih buka saat terima pesanan
         if (accept) {
             await assertMerchantOpen(merchantId, 'order.merchantRespond');
 
@@ -1282,6 +1298,9 @@ export const orderService = {
             accept_expires_at: order.accept_expires_at ?? null,
             item_budget: String(order.item_budget ?? 0),
             jastip_shop_note: order.jastip_shop_note ?? '',
+            // 🆕 Boolean flag — JANGAN kirim nilai kode asli ke driver.
+            // Driver hanya perlu tahu apakah perlu minta kode ke penerima.
+            has_send_code: order.type === 'send' ? !!order.send_code : false,
         };
 
         const driverCopyBase = {
@@ -2296,6 +2315,10 @@ export const orderService = {
             customer,
             driver,
             merchant: merchantRes.data,
+            // 🆕 Ekspos flag boolean ke client (tanpa membocorkan nilai kode asli ke driver).
+            // Customer & admin tetap bisa melihat send_code via field `send_code` di atas.
+            has_send_code:
+                order.type === 'send' ? !!order.send_code : false,
         };
     },
 
@@ -2391,9 +2414,6 @@ export const orderService = {
     // ============================================================
     // UPLOAD PACKAGE PHOTO
     // ============================================================
-    // ============================================================
-    // UPLOAD PACKAGE PHOTO
-    // ============================================================
     async uploadPackagePhoto(
         orderId: number,
         driverId: string,
@@ -2424,9 +2444,9 @@ export const orderService = {
             throw ApiError.badRequest('Foto paket hanya untuk order send');
         }
 
-        // ✅ FIX: izinkan upload selama order masih aktif di fase pra-antar.
-        // Flow baru: accepted → arrived → in_progress → (upload foto) → completed
-        // Jadi `in_progress` WAJIB diizinkan.
+        // 🔧 FIX: flow baru accepted → arrived → in_progress → completed.
+        // `in_progress` wajib diizinkan karena upload foto terjadi setelah
+        // driver konfirmasi jemput paket (status = in_progress).
         const UPLOAD_ALLOWED_STATUS = ['accepted', 'arrived', 'in_progress'];
         if (!UPLOAD_ALLOWED_STATUS.includes(order.status)) {
             logger.warn('[order.uploadPhoto] Status tidak mengizinkan upload', {
