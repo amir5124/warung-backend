@@ -2391,6 +2391,9 @@ export const orderService = {
     // ============================================================
     // UPLOAD PACKAGE PHOTO
     // ============================================================
+    // ============================================================
+    // UPLOAD PACKAGE PHOTO
+    // ============================================================
     async uploadPackagePhoto(
         orderId: number,
         driverId: string,
@@ -2420,8 +2423,18 @@ export const orderService = {
         if (order.type !== 'send') {
             throw ApiError.badRequest('Foto paket hanya untuk order send');
         }
-        if (order.status !== 'accepted' && order.status !== 'arrived') {
-            throw ApiError.badRequest(
+
+        // ✅ FIX: izinkan upload selama order masih aktif di fase pra-antar.
+        // Flow baru: accepted → arrived → in_progress → (upload foto) → completed
+        // Jadi `in_progress` WAJIB diizinkan.
+        const UPLOAD_ALLOWED_STATUS = ['accepted', 'arrived', 'in_progress'];
+        if (!UPLOAD_ALLOWED_STATUS.includes(order.status)) {
+            logger.warn('[order.uploadPhoto] Status tidak mengizinkan upload', {
+                orderId,
+                status: order.status,
+                allowed: UPLOAD_ALLOWED_STATUS,
+            });
+            throw ApiError.conflict(
                 'Foto paket hanya bisa diupload saat order aktif'
             );
         }
