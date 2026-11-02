@@ -8,34 +8,34 @@ import { logger } from '../../config/logger';
 // KONFIGURASI CHANNEL & SOUND PER ROLE
 // ============================================================
 // ⚠️ Channel ID & sound HARUS SAMA dengan:
-// - _layout.tsx di masing-masing app (customer / driver / merchant)
-// - app.json `defaultChannel` di masing-masing app
-// - File suara di android/app/src/main/res/raw/<sound>.mp3
-//   (TANPA ekstensi .mp3)
+// - _layout.tsx di masing-masing app (customer / driver / merchant / admin)
+//   → Notifications.setNotificationChannelAsync(<channelId>, ...)
+// - File suara yang didaftarkan di plugin expo-notifications (`sounds`)
+//   di app.json masing-masing app
 //
-// Nama file suara di app:
-// - customer: assets/sounds/customer.mp3
-// - driver:   assets/sounds/driver-order.mp3
-// - merchant: assets/sounds/merchant-order.mp3
-// ============================================================
-
-type UserRole = 'customer' | 'driver' | 'merchant';
-
 // Nama file suara di app (ekstensi .mp3 ikut ditulis, underscore bukan tanda hubung):
 // - customer: assets/sounds/customer.mp3
 // - driver:   assets/sounds/driver_order.mp3
 // - merchant: assets/sounds/merchant_order.mp3
+// - admin:    memakai suara bawaan ('default') sampai file suara admin dibuat
+//             (kalau nanti ada: ganti ke 'admin_notif.mp3' dan daftarkan
+//              di plugin expo-notifications app admin)
+// ============================================================
+
+type UserRole = 'customer' | 'driver' | 'merchant' | 'admin';
 
 const CHANNEL_MAP: Record<UserRole, string> = {
     customer: 'customer-notif-v2',      // sebelumnya v1
     driver: 'driver-orders-v4',
     merchant: 'merchant-orders-v1',
+    admin: 'admin-notif-v1',
 };
 
 const SOUND_MAP: Record<UserRole, string> = {
     customer: 'customer.mp3',           // sebelumnya 'customer'
     driver: 'driver_order.mp3',
-    merchant: 'merchant_order.mp3',         // lihat catatan di bawah
+    merchant: 'merchant_order.mp3',
+    admin: 'default',
 };
 
 // Fallback kalau role tidak dikenal
@@ -68,7 +68,7 @@ export const notificationService = {
     async sendToUser(userId: string, payload: NotificationPayload) {
         // ---------- 1. Simpan ke DB ----------
         try {
-            await supabaseAdmin.from('notifications').insert({
+            const { error } = await supabaseAdmin.from('notifications').insert({
                 user_id: userId,
                 title: payload.title,
                 body: payload.body,
@@ -76,6 +76,12 @@ export const notificationService = {
                 channel: 'both',
                 sent_at: new Date().toISOString(),
             });
+            if (error) {
+                logger.warn('Gagal simpan notification', {
+                    userId,
+                    err: error.message,
+                });
+            }
         } catch (err: any) {
             logger.warn('Gagal simpan notification', {
                 userId,
@@ -149,7 +155,7 @@ export const notificationService = {
 
         // ---------- 1. Simpan ke DB batch ----------
         try {
-            await supabaseAdmin.from('notifications').insert(
+            const { error } = await supabaseAdmin.from('notifications').insert(
                 userIds.map((uid) => ({
                     user_id: uid,
                     title: payload.title,
@@ -159,6 +165,11 @@ export const notificationService = {
                     sent_at: new Date().toISOString(),
                 }))
             );
+            if (error) {
+                logger.warn('Gagal batch insert notifications', {
+                    err: error.message,
+                });
+            }
         } catch (err: any) {
             logger.warn('Gagal batch insert notifications', {
                 err: err.message,
@@ -195,6 +206,7 @@ export const notificationService = {
             customer: [],
             driver: [],
             merchant: [],
+            admin: [],
         };
 
         profiles.forEach((p) => {
@@ -229,6 +241,36 @@ export const notificationService = {
                 sound,
             });
         }
+    },
+
+    // ============================================================
+    // KIRIM KE SEMUA USER DENGAN ROLE TERTENTU
+    // Contoh: notifikasi ke semua admin saat ada order bermasalah,
+    //         driver baru mendaftar, atau top up menunggu verifikasi.
+    // ============================================================
+    async sendToRole(role: UserRole, payload: NotificationPayload) {
+        const { data, error } = await supabaseAdmin
+            .from('profiles')
+            .select('id')
+            .eq('role', role);
+
+        if (error) {
+            logger.warn('Gagal ambil user per role', { role, err: error.message });
+            return;
+        }
+
+        const ids = (data ?? []).map((p) => p.id as string);
+        if (!ids.length) {
+            logger.warn('Tidak ada user dengan role ini', { role });
+            return;
+        }
+
+        await this.sendToUsers(ids, payload);
+    },
+
+    // Pintasan untuk admin
+    async sendToAdmins(payload: NotificationPayload) {
+        return this.sendToRole('admin', payload);
     },
 
     // ============================================================
