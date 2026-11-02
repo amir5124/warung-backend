@@ -150,7 +150,11 @@ export const notificationService = {
     // ============================================================
     // KIRIM KE BANYAK USER (group by role)
     // ============================================================
-    async sendToUsers(userIds: string[], payload: NotificationPayload) {
+    async sendToUsers(
+        userIds: string[],
+        payload: NotificationPayload,
+        opts: { channelId?: string; sound?: string } = {}
+    ) {
         if (!userIds.length) return;
 
         // ---------- 1. Simpan ke DB batch ----------
@@ -227,9 +231,9 @@ export const notificationService = {
                 title: payload.title,
                 body: payload.body,
                 data: payload.data,
-                sound,          // ← sesuai role
+                sound: opts.sound ?? sound,
                 priority: 'high' as const,
-                channelId,      // ← sesuai role
+                channelId: opts.channelId ?? channelId,
             }));
 
             await expoPushService.send(messages);
