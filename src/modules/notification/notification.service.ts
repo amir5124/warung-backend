@@ -28,7 +28,7 @@ const CHANNEL_MAP: Record<UserRole, string> = {
     customer: 'customer-notif-v2',
     driver: 'driver-orders-v4',
     merchant: 'merchant-orders-v1',
-    admin: 'admin-notif-v1',        // naik dari v1
+    admin: 'admin-notif-v2',        // naik dari v1
 };
 
 const SOUND_MAP: Record<UserRole, string> = {
