@@ -25,17 +25,17 @@ import { logger } from '../../config/logger';
 type UserRole = 'customer' | 'driver' | 'merchant' | 'admin';
 
 const CHANNEL_MAP: Record<UserRole, string> = {
-    customer: 'customer-notif-v2',      // sebelumnya v1
+    customer: 'customer-notif-v2',
     driver: 'driver-orders-v4',
     merchant: 'merchant-orders-v1',
-    admin: 'admin-notif-v1',
+    admin: 'admin-notif-v2',        // naik dari v1
 };
 
 const SOUND_MAP: Record<UserRole, string> = {
-    customer: 'customer.mp3',           // sebelumnya 'customer'
+    customer: 'customer.mp3',
     driver: 'driver_order.mp3',
     merchant: 'merchant_order.mp3',
-    admin: 'default',
+    admin: 'admin.mp3',             // sebelumnya 'default'
 };
 
 // Fallback kalau role tidak dikenal
