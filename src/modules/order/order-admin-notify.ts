@@ -8,7 +8,16 @@
 //  - Semua fungsi "fire and forget": panggil dengan `void adminOrderNotify.xxx(...)`.
 //    Tidak pernah melempar error, jadi tidak mengganggu alur order.
 //  - Bergantung pada notificationService.sendToUsers dan role 'admin'
-//    (channel `admin-notif-v1` di app admin).
+//    (channel `admin-notif-v2` di app admin; lihat CHANNEL_MAP / SOUND_MAP).
+//
+// Payload `data` yang diterima app admin (dipakai untuk navigasi saat notif
+// diklik → app/pesanan/[id].tsx):
+//   type        : `admin_<event>`  (mis. admin_new_order)
+//   severity    : info | warning | critical
+//   order_id    : id order (string)  ← kunci navigasi
+//   order_code  : kode order
+//   service     : food | send | ride | jastip
+//   status      : status order saat notif dikirim (untuk statusChanged = status BARU)
 //
 // Mematikan sebagian notifikasi tanpa ubah kode (env, pisahkan dengan koma):
 //   ADMIN_NOTIFY_MUTE=status_arrived,status_in_progress,driver_assigned
@@ -210,6 +219,8 @@ async function emit(
                 order_id: String(order.id),
                 order_code: order.order_code ?? '',
                 service: order.type ?? '',
+                status: order.status ?? '',
+                // `extra` boleh menimpa field di atas (mis. status BARU)
                 ...(built.extra ?? {}),
             },
         });
@@ -225,6 +236,86 @@ async function emit(
             orderId: rawOrder?.id,
             err: err?.message,
         });
+    }
+}
+
+// ============================================================
+// COPY PERUBAHAN STATUS
+// `o` = data order SEBELUM berubah (supaya tahap pembatalan bisa dibaca).
+// ============================================================
+function buildStatusCopy(
+    o: any,
+    p: Parties,
+    status: string,
+    ctx: { actorId?: string; actorRole?: string; reason?: string | null }
+): Built | null {
+    const s = svc(o);
+    const kind = kindOf(o.type);
+    const driver = p.driver ?? 'Driver';
+    const exclude = ctx.actorRole === 'admin' ? ctx.actorId : undefined;
+
+    switch (status) {
+        case 'arrived': {
+            const title =
+                kind === 'ride'
+                    ? '📍 Driver tiba di titik jemput'
+                    : kind === 'send'
+                        ? '📍 Driver tiba di lokasi pengirim'
+                        : '📍 Driver tiba di toko';
+            return {
+                title,
+                body: `${driver} · ${code(o)} (${s.label}) · ${place(o.pickup_name)}`,
+                exclude,
+            };
+        }
+        case 'purchasing':
+            return {
+                title: '🛒 Driver mulai belanja',
+                body: `${driver} berbelanja untuk ${code(o)} di ${place(o.pickup_name)} · pemesan ${p.customer}`,
+                exclude,
+            };
+        case 'in_progress': {
+            const title =
+                kind === 'ride'
+                    ? '🚀 Perjalanan dimulai'
+                    : kind === 'send'
+                        ? '🚀 Pengantaran paket dimulai'
+                        : kind === 'food'
+                            ? '🚀 Pesanan sedang diantar'
+                            : '🚀 Belanjaan sedang diantar';
+            return {
+                title,
+                body: `${driver} menuju ${place(o.dropoff_name)} · ${code(o)} · ${p.customer}`,
+                exclude,
+            };
+        }
+        case 'completed':
+            return {
+                title: '🎯 Order selesai',
+                body: `${code(o)} (${s.label}) selesai · ${driver} → ${p.customer} · ${rp(o.total_fare)}`,
+                exclude,
+            };
+        case 'cancelled': {
+            const who =
+                ctx.actorRole === 'customer'
+                    ? `customer ${p.customer}`
+                    : ctx.actorRole === 'driver'
+                        ? `driver ${driver}`
+                        : ctx.actorRole === 'merchant'
+                            ? `toko ${p.store ?? ''}`.trim()
+                            : ctx.actorRole === 'admin'
+                                ? 'admin'
+                                : 'sistem';
+            const stage = STAGE[o.status] ? ` ${STAGE[o.status]}` : '';
+            return {
+                title: '❌ Order dibatalkan',
+                body: `${code(o)} (${s.label}) dibatalkan oleh ${who}${stage}. Alasan: ${ctx.reason || '-'}`,
+                severity: 'warning',
+                exclude,
+            };
+        }
+        default:
+            return null;
     }
 }
 
@@ -306,80 +397,16 @@ export const adminOrderNotify = {
 
     // ── Perubahan status lewat updateStatus ──
     // `order` = data SEBELUM berubah (supaya tahap pembatalan bisa dibaca).
+    // Field `status` di payload diisi status BARU lewat `extra`.
     statusChanged(
         order: any,
         status: string,
         ctx: { actorId?: string; actorRole?: string; reason?: string | null } = {}
     ) {
         return emit(`status_${status}`, order, (o, p) => {
-            const s = svc(o);
-            const kind = kindOf(o.type);
-            const driver = p.driver ?? 'Driver';
-            const exclude = ctx.actorRole === 'admin' ? ctx.actorId : undefined;
-
-            switch (status) {
-                case 'arrived': {
-                    const title =
-                        kind === 'ride'
-                            ? '📍 Driver tiba di titik jemput'
-                            : kind === 'send'
-                                ? '📍 Driver tiba di lokasi pengirim'
-                                : '📍 Driver tiba di toko';
-                    return {
-                        title,
-                        body: `${driver} · ${code(o)} (${s.label}) · ${place(o.pickup_name)}`,
-                        exclude,
-                    };
-                }
-                case 'purchasing':
-                    return {
-                        title: '🛒 Driver mulai belanja',
-                        body: `${driver} berbelanja untuk ${code(o)} di ${place(o.pickup_name)} · pemesan ${p.customer}`,
-                        exclude,
-                    };
-                case 'in_progress': {
-                    const title =
-                        kind === 'ride'
-                            ? '🚀 Perjalanan dimulai'
-                            : kind === 'send'
-                                ? '🚀 Pengantaran paket dimulai'
-                                : kind === 'food'
-                                    ? '🚀 Pesanan sedang diantar'
-                                    : '🚀 Belanjaan sedang diantar';
-                    return {
-                        title,
-                        body: `${driver} menuju ${place(o.dropoff_name)} · ${code(o)} · ${p.customer}`,
-                        exclude,
-                    };
-                }
-                case 'completed':
-                    return {
-                        title: '🎯 Order selesai',
-                        body: `${code(o)} (${s.label}) selesai · ${driver} → ${p.customer} · ${rp(o.total_fare)}`,
-                        exclude,
-                    };
-                case 'cancelled': {
-                    const who =
-                        ctx.actorRole === 'customer'
-                            ? `customer ${p.customer}`
-                            : ctx.actorRole === 'driver'
-                                ? `driver ${driver}`
-                                : ctx.actorRole === 'merchant'
-                                    ? `toko ${p.store ?? ''}`.trim()
-                                    : ctx.actorRole === 'admin'
-                                        ? 'admin'
-                                        : 'sistem';
-                    const stage = STAGE[o.status] ? ` ${STAGE[o.status]}` : '';
-                    return {
-                        title: '❌ Order dibatalkan',
-                        body: `${code(o)} (${s.label}) dibatalkan oleh ${who}${stage}. Alasan: ${ctx.reason || '-'}`,
-                        severity: 'warning',
-                        exclude,
-                    };
-                }
-                default:
-                    return null;
-            }
+            const built = buildStatusCopy(o, p, status, ctx);
+            if (!built) return null;
+            return { ...built, extra: { status, ...(built.extra ?? {}) } };
         });
     },
 
